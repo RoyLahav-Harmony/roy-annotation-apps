@@ -213,9 +213,8 @@ n_cd_calls = sum(
     if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])
 )
 
-col1, col2 = st.columns(2)
+col1, = st.columns(1)
 col1.metric("Total conversations", total)
-col2.metric("Empty / single-turn", total - with_pairs)
 
 col4, col5, col6, col7, col8 = st.columns(5)
 col4.metric("✅ Converted", n_converted)
