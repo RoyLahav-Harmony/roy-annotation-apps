@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import re
 import pandas as pd
+import plotly.graph_objects as go
 from datetime import datetime, timezone
 
 st.set_page_config(page_title="Calls Extracted", layout="wide")
@@ -9,7 +10,12 @@ st.title("Extracted Call Conversations")
 
 st.markdown("""
 <style>
-[data-testid="stMetricLabel"] { font-size: 1.8rem !important; }
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricLabel"] label,
+[data-testid="stMetricLabel"] div {
+    font-size: 1.8rem !important;
+    font-weight: 500 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -391,6 +397,42 @@ with tab3:
         m5, m6 = st.columns(2)
         m5.metric("🔍 Calls with contact discovery", f"{cd_calls} ({cd_calls / len(sc) * 100:.1f}%)")
         m6.metric("🔍 Contact discovery utterances", cd_utterances)
+
+        st.markdown("---")
+
+        # ── Goal funnel ────────────────────────────────────────────────────────
+        st.markdown("**Goal Funnel Drop-off**")
+
+        _IDENTITY_GOALS = {
+            "base_agents/outbound agents/speaker verification",
+            "base_agents/inbound agents/inbound contact name",
+            "base_agents/contact discovery",
+        }
+
+        funnel_stages = [
+            ("Connected",           lambda _: True),
+            ("Identity Verified",   lambda goals: bool(goals & _IDENTITY_GOALS)),
+            ("Pitch Delivered",     lambda goals: "say pitch" in goals),
+            ("Scheduling Initiated",lambda goals: any("scheduling-via-voice" in g for g in goals)),
+            ("Meeting Confirmed",   lambda goals: bool(goals & _CONFIRMED_SCHEDULING_PATHS)),
+        ]
+
+        funnel_counts = []
+        for label, check in funnel_stages:
+            n = sum(
+                1 for c in sc
+                if check({p["Goal"] for p in c["pairs"] if p["Goal"] != "—"})
+            )
+            funnel_counts.append((label, n))
+
+        fig = go.Figure(go.Funnel(
+            y=[label for label, _ in funnel_counts],
+            x=[count for _, count in funnel_counts],
+            textinfo="value+percent initial",
+            marker={"color": ["#4C9BE8", "#5DADE2", "#48C9B0", "#F4D03F", "#2ECC71"]},
+        ))
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=10), height=350)
+        st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
 
