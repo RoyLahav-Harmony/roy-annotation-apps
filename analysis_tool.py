@@ -422,7 +422,6 @@ with tab3:
             ("Connected",             lambda _: True),
             ("Reached Decision Maker",lambda goals: bool(goals & _DM_REACHED_GOALS)),
             ("Contact Discovery",     lambda goals: bool(goals & _DISCOVERY_GOALS)),
-            ("Pitch Delivered",       lambda goals: "say pitch" in goals),
             ("Scheduling Initiated",  lambda goals: bool(goals & _SCHEDULING_GOALS)),
             ("Meeting Confirmed",     lambda goals: bool(goals & _CONFIRMED_SCHEDULING_PATHS)),
         ]
@@ -439,7 +438,7 @@ with tab3:
             y=[label for label, _ in funnel_counts],
             x=[count for _, count in funnel_counts],
             textinfo="value+percent initial",
-            marker={"color": ["#4C9BE8", "#5DADE2", "#48C9B0", "#58D68D", "#F4D03F", "#2ECC71"]},
+            marker={"color": ["#4C9BE8", "#5DADE2", "#48C9B0", "#F4D03F", "#2ECC71"]},
         ))
         fig.update_layout(margin=dict(l=0, r=0, t=10, b=10), height=350)
         st.plotly_chart(fig, use_container_width=True)
