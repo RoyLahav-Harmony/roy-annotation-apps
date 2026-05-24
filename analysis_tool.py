@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 st.set_page_config(page_title="Calls Extracted", layout="wide")
 st.title("Extracted Call Conversations")
 
+st.markdown("""
+<style>
+[data-testid="stMetricLabel"] { font-size: 1.8rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # ── Intent + confidence parser ─────────────────────────────────────────────────
 INTENT_RE = re.compile(
     r'detected (?:hard-coded )?intent "([^"]+)" as "[^"]+" ([\d.]+)%'
