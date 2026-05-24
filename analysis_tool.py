@@ -208,6 +208,15 @@ n_callback = sum(1 for c in conversations if c["outcome"] == "Callback Scheduled
 n_transferred = sum(1 for c in conversations if c["outcome"] == "Transferred")
 n_voicemail = sum(1 for c in conversations if c["outcome"] == "Voicemail")
 n_rejection = sum(1 for c in conversations if c["outcome"] == "Rejection")
+n_cd_calls = sum(
+    1 for c in conversations
+    if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])
+)
+n_cd_utterances = sum(
+    1 for c in conversations
+    for p in c["pairs"]
+    if p["Goal"] == "base_agents/contact discovery"
+)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total conversations", total)
@@ -220,6 +229,10 @@ col5.metric("📅 Callback Scheduled", n_callback)
 col6.metric("🔀 Transferred", n_transferred)
 col7.metric("📬 Voicemail", n_voicemail)
 col8.metric("🚫 Rejection", n_rejection)
+
+col9, col10 = st.columns(2)
+col9.metric("🔍 Calls with contact discovery", f"{n_cd_calls} ({n_cd_calls / total * 100:.1f}%)" if total else "0")
+col10.metric("🔍 Contact discovery utterances", n_cd_utterances)
 
 st.markdown("---")
 
