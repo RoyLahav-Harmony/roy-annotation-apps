@@ -212,16 +212,10 @@ n_cd_calls = sum(
     1 for c in conversations
     if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])
 )
-n_cd_utterances = sum(
-    1 for c in conversations
-    for p in c["pairs"]
-    if p["Goal"] == "base_agents/contact discovery"
-)
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 col1.metric("Total conversations", total)
-col2.metric("With user–agent pairs", with_pairs)
-col3.metric("Empty / single-turn", total - with_pairs)
+col2.metric("Empty / single-turn", total - with_pairs)
 
 col4, col5, col6, col7, col8 = st.columns(5)
 col4.metric("✅ Converted", n_converted)
@@ -230,9 +224,8 @@ col6.metric("🔀 Transferred", n_transferred)
 col7.metric("📬 Voicemail", n_voicemail)
 col8.metric("🚫 Rejection", n_rejection)
 
-col9, col10 = st.columns(2)
+col9, = st.columns(1)
 col9.metric("🔍 Calls with contact discovery", f"{n_cd_calls} ({n_cd_calls / total * 100:.1f}%)" if total else "0")
-col10.metric("🔍 Contact discovery utterances", n_cd_utterances)
 
 st.markdown("---")
 
