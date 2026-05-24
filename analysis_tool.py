@@ -248,11 +248,13 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     search_col, filter_col = st.columns([3, 1])
     search = search_col.text_input("Search by call ID or utterance content")
-    outcome_options = ["All"] + list(OUTCOME_EMOJI.keys())
+    outcome_options = ["All"] + list(OUTCOME_EMOJI.keys()) + ["🔍 Contact Discovery"]
     outcome_filter = filter_col.selectbox("Filter by outcome", outcome_options)
 
     filtered = conversations
-    if outcome_filter != "All":
+    if outcome_filter == "🔍 Contact Discovery":
+        filtered = [c for c in filtered if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])]
+    elif outcome_filter != "All":
         filtered = [c for c in filtered if c["outcome"] == outcome_filter]
     if search:
         q = search.lower()
