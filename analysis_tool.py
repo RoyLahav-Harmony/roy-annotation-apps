@@ -700,7 +700,7 @@ with tab4:
     if not combined:
         st.info("No pairs to display.")
     else:
-        display_cols = ["chat_id", "#", "User", "Agent", "Goal", "Intent", "Confidence"]
+        display_cols = ["chat_id", "#", "Prev Agent", "User", "Agent", "Goal", "Intent", "Confidence"]
         st.dataframe(
             pd.DataFrame(combined)[display_cols],
             use_container_width=True,
