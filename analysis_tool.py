@@ -555,9 +555,18 @@ with tab3:
         st.markdown("**User Confusion Rate**")
 
         CONFUSION_SIGNALS = {
-            "What? / Huh?":     re.compile(r'\b(what\s*\?+|huh\s*\??)\b', re.I),
-            "Can you repeat?":  re.compile(r'\b(can you repeat|could you repeat|say that again|repeat (that|yourself))\b', re.I),
-            "Sorry / Pardon":   re.compile(r'\b(sorry\s*\?+|pardon\s*\??|excuse me\s*\?)\b', re.I),
+            "What? / Huh? / Come again?": re.compile(
+                r'\b(what\s*\?+|huh\s*\??|come again|what was that|what did you say|say what)\b', re.I),
+            "Repeat request": re.compile(
+                r'\b(can you repeat|could you repeat|say that again|repeat that|repeat yourself|one more time|again please|repeat please)\b', re.I),
+            "Didn't understand": re.compile(
+                r"\b(i don'?t understand|i didn'?t understand|i'?m confused|what do you mean|what are you (saying|talking about)|i'?m lost|didn'?t catch (that|you)|didn'?t get that|didn'?t hear (that|you)|i'?m not following)\b", re.I),
+            "Hearing issues": re.compile(
+                r"\b(can'?t hear (you)?|couldn'?t hear|hard to hear|you'?re breaking up|bad connection|speak up|can you speak up|louder please|i can'?t hear)\b", re.I),
+            "Pardon / Excuse me / Sorry?": re.compile(
+                r'\b(pardon\s*\??|excuse me\s*\??|sorry\s*\?+|i beg your pardon|beg your pardon)\b', re.I),
+            "Clarification request": re.compile(
+                r"\b(what do you mean by|can you (clarify|explain)|could you (clarify|explain)|not sure (what|i understand)|what exactly|what specifically)\b", re.I),
             "Repeated utterance": None,
         }
 
@@ -583,9 +592,11 @@ with tab3:
 
         conf_pct = conf_calls / len(sc) * 100 if sc else 0
         st.metric("Calls with confusion signals", f"{conf_calls} ({conf_pct:.1f}%)")
-        sig_labels = list(conf_signal_counts.keys())
-        sig_vals   = list(conf_signal_counts.values())
-        st.plotly_chart(pct_bar(sig_labels, sig_vals), use_container_width=True)
+        conf_active = {k: v for k, v in conf_signal_counts.items() if v > 0}
+        if conf_active:
+            st.plotly_chart(pct_bar(list(conf_active.keys()), list(conf_active.values())), use_container_width=True)
+        else:
+            st.info("No confusion signals detected in the selected calls.")
 
         st.markdown("---")
 
@@ -593,10 +604,22 @@ with tab3:
         st.markdown("**User Frustration Rate**")
 
         FRUSTRATION_SIGNALS = {
-            "Human / Representative": re.compile(r'\b(human please|speak to a human|talk to a human|talk to a person|real person|representative|speak to someone)\b', re.I),
-            "Stop":                   re.compile(r'\bstop\b', re.I),
-            "Not listening":          re.compile(r"\b(not listening|you'?re not listening|not understanding|you'?re not understanding)\b", re.I),
-            "Scam / Spam":            re.compile(r'\b(scam|spam|fraud|stop calling)\b', re.I),
+            "Human / Agent request": re.compile(
+                r"\b(human( please)?|real person|live (person|agent)|speak to (a |an )?(human|agent|person|representative|rep|operator)|talk to (a |an )?(human|agent|person|representative|rep)|transfer me|connect me to|agent please|representative please|operator please|get me (a |an )?(human|agent|person))\b", re.I),
+            "Stop / Remove me": re.compile(
+                r"\b(stop( calling( me)?)?|stop it|leave me alone|don'?t (call|contact) me|do not call|remove me( from)?|take me off|unsubscribe|block (this number|you)|put me on (the )?(do not call|dnc))\b", re.I),
+            "Not interested": re.compile(
+                r"\b(not interested|i'?m not interested|no thank you|no thanks|not at this time|not right now|we'?re not (looking|interested)|don'?t need (this|that|it)|don'?t want (this|that|it))\b", re.I),
+            "Scam / Spam": re.compile(
+                r'\b(scam|spam|fraud(ulent)?|illegal|harassment|harassing|report (you|this)|stop calling me|robocall|robo call|soliciting)\b', re.I),
+            "Not listening / Understanding": re.compile(
+                r"\b(not listening|you'?re not listening|not understanding|you'?re not understanding|stop wasting my time|waste of time|this is (ridiculous|stupid|annoying)|you'?re (not|repeating)|said (no|stop) already)\b", re.I),
+            "Already refused": re.compile(
+                r"\b(i (already |just )?(said|told you|answered|said no)|already told you|i said no|told you (already|before)|said it (already|before))\b", re.I),
+            "Hang up threat": re.compile(
+                r"\b(i'?m (going to |gonna )?(hang up|hang|end this|end the call)|hanging up|i'?ll hang up|just hang up|going to hang)\b", re.I),
+            "Anger / Profanity": re.compile(
+                r"\b(damn|hell|crap|ridiculous|stupid (call|bot|machine|system)|this is (bull|bs)|what (the hell|on earth))\b", re.I),
         }
 
         frust_signal_counts = {sig: 0 for sig in FRUSTRATION_SIGNALS}
@@ -612,6 +635,8 @@ with tab3:
 
         frust_pct = frust_calls / len(sc) * 100 if sc else 0
         st.metric("Calls with frustration signals", f"{frust_calls} ({frust_pct:.1f}%)")
-        fsig_labels = list(frust_signal_counts.keys())
-        fsig_vals   = list(frust_signal_counts.values())
-        st.plotly_chart(pct_bar(fsig_labels, fsig_vals), use_container_width=True)
+        frust_active = {k: v for k, v in frust_signal_counts.items() if v > 0}
+        if frust_active:
+            st.plotly_chart(pct_bar(list(frust_active.keys()), list(frust_active.values())), use_container_width=True)
+        else:
+            st.info("No frustration signals detected in the selected calls.")
