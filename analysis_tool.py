@@ -1,4 +1,5 @@
 import math
+import random
 import streamlit as st
 import json
 import re
@@ -271,6 +272,11 @@ for conv in conversations:
             elif conf == 1.0:
                 high_conf_pairs.append(tagged)
 
+# ── Pre-initialise all session state to avoid tab resets on first interaction ──
+for idx in range(len(low_conf_pairs)):
+    st.session_state.setdefault(f"review_{idx}", None)
+st.session_state.setdefault("review_seed", 42)
+
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs([
     "All Conversations",
@@ -339,9 +345,6 @@ with tab2:
 
         for idx, pair in enumerate(low_conf_pairs):
             key = f"review_{idx}"
-            if key not in st.session_state:
-                st.session_state[key] = None
-
             c0, c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([2, 2, 2, 2, 1.5, 1, 0.8, 1, 1.2, 1.1])
             c0.write(pair["chat_id"])
             c1.write(pair["Prev Agent"])
@@ -659,8 +662,6 @@ with tab3:
 
 # ── Tab 4: review dataset ──────────────────────────────────────────────────────
 with tab4:
-    import random
-
     n_low = len(low_conf_pairs)
     n_high_available = len(high_conf_pairs)
 
@@ -705,4 +706,12 @@ with tab4:
             pd.DataFrame(combined)[display_cols],
             use_container_width=True,
             hide_index=True,
+        )
+
+        st.markdown("---")
+        st.download_button(
+            label="⬇️ Download as JSON",
+            data=json.dumps(combined, ensure_ascii=False, indent=2),
+            file_name="review_dataset.json",
+            mime="application/json",
         )
