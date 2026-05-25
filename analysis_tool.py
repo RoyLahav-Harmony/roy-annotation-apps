@@ -369,8 +369,6 @@ with tab3:
             for p in c["pairs"]:
                 pair_rows.append({
                     "outcome": c["outcome"],
-                    "goal": p["Goal"] if p["Goal"] != "—" else None,
-                    "intent": p["Intent"] if p["Intent"] != "—" else None,
                     "confidence": p["Confidence"] if isinstance(p["Confidence"], float) else None,
                 })
         pairs_df = pd.DataFrame(pair_rows)
@@ -445,92 +443,54 @@ with tab3:
 
         st.markdown("---")
 
-        # ── Outcome distribution + call length histogram ───────────────────────
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("**Outcome distribution**")
-            outcome_counts = (
-                conv_df["outcome"]
-                .value_counts()
-                .rename_axis("Outcome")
-                .reset_index(name="Calls")
-                .set_index("Outcome")
-            )
-            st.bar_chart(outcome_counts)
-
-        with col2:
-            st.markdown("**Call length distribution (turns)**")
-            bins = pd.cut(conv_df["n_turns"], bins=10)
-            bin_counts = (
-                bins.value_counts()
-                .sort_index()
-                .rename_axis("Turns")
-                .reset_index(name="Calls")
-                .assign(Turns=lambda df: df["Turns"].astype(str))
-                .set_index("Turns")
-            )
-            st.bar_chart(bin_counts)
-
-        st.markdown("---")
-
-        # ── Goal path frequency ────────────────────────────────────────────────
-        st.markdown("**Top goal paths (across all turns)**")
-        goal_counts = (
-            pairs_df["goal"]
-            .dropna()
+        # ── Outcome distribution ───────────────────────────────────────────────
+        st.markdown("**Outcome distribution**")
+        outcome_counts = (
+            conv_df["outcome"]
             .value_counts()
-            .head(15)
-            .rename_axis("Goal")
-            .reset_index(name="Occurrences")
-            .set_index("Goal")
+            .rename_axis("Outcome")
+            .reset_index(name="Calls")
+            .set_index("Outcome")
         )
-        if goal_counts.empty:
-            st.info("No goal data for the selected outcomes.")
+        st.bar_chart(outcome_counts)
+
+        st.markdown("---")
+
+        # ── Call length distribution ───────────────────────────────────────────
+        st.markdown("**Call length distribution (turns)**")
+        bins = pd.cut(conv_df["n_turns"], bins=10)
+        bin_counts = (
+            bins.value_counts()
+            .sort_index()
+            .rename_axis("Turns")
+            .reset_index(name="Calls")
+            .assign(Turns=lambda df: df["Turns"].astype(str))
+            .set_index("Turns")
+        )
+        st.bar_chart(bin_counts)
+
+        st.markdown("---")
+
+        # ── Confidence score distribution ──────────────────────────────────────
+        st.markdown("**Confidence score distribution**")
+        conf_series = pairs_df["confidence"].dropna()
+        if conf_series.empty:
+            st.info("No confidence data for the selected outcomes.")
         else:
-            st.bar_chart(goal_counts)
-
-        st.markdown("---")
-
-        # ── Intent distribution + confidence distribution ──────────────────────
-        col3, col4 = st.columns(2)
-
-        with col3:
-            st.markdown("**Top intents**")
-            intent_counts = (
-                pairs_df["intent"]
-                .dropna()
-                .value_counts()
-                .head(15)
-                .rename_axis("Intent")
-                .reset_index(name="Occurrences")
-                .set_index("Intent")
+            conf_bins = pd.cut(conf_series, bins=[0, 0.5, 0.7, 0.85, 0.95, 1.0],
+                               labels=["0–0.5", "0.5–0.7", "0.7–0.85", "0.85–0.95", "0.95–1.0"])
+            conf_counts = (
+                conf_bins.value_counts()
+                .sort_index()
+                .rename_axis("Confidence")
+                .reset_index(name="Pairs")
+                .set_index("Confidence")
             )
-            if intent_counts.empty:
-                st.info("No intent data for the selected outcomes.")
-            else:
-                st.bar_chart(intent_counts)
-
-        with col4:
-            st.markdown("**Confidence score distribution**")
-            conf_series = pairs_df["confidence"].dropna()
-            if conf_series.empty:
-                st.info("No confidence data for the selected outcomes.")
-            else:
-                conf_bins = pd.cut(conf_series, bins=[0, 0.5, 0.7, 0.85, 0.95, 1.0],
-                                   labels=["0–0.5", "0.5–0.7", "0.7–0.85", "0.85–0.95", "0.95–1.0"])
-                conf_counts = (
-                    conf_bins.value_counts()
-                    .sort_index()
-                    .rename_axis("Confidence")
-                    .reset_index(name="Pairs")
-                    .set_index("Confidence")
-                )
-                st.bar_chart(conf_counts)
+            st.bar_chart(conf_counts)
 
         st.markdown("---")
 
-        # ── Avg turns by outcome (only useful when multiple outcomes selected) ─
+        # ── Avg turns by outcome ───────────────────────────────────────────────
         if len(selected_outcomes) > 1:
             st.markdown("**Average turns by outcome**")
             avg_by_outcome = (
@@ -543,42 +503,38 @@ with tab3:
             )
             st.bar_chart(avg_by_outcome)
 
-        st.markdown("---")
+            st.markdown("---")
 
-        # ── Disconnect stage distribution (rejection calls only) ─────────────
+        # ── Disconnect stage distribution (rejection calls only) ───────────────
         st.markdown("**🚫 Where in the call did rejections happen?**")
         rejection_calls = [c for c in sc if c["outcome"] == "Rejection"]
         if not rejection_calls:
             st.info("No rejection calls in the selected outcomes.")
         else:
-            col5, col6 = st.columns(2)
+            st.markdown("**Last goal reached before rejection**")
+            stage_counts = (
+                pd.Series(
+                    [c["disconnect_stage"] or "No goal recorded" for c in rejection_calls],
+                    name="Stage",
+                )
+                .value_counts()
+                .rename_axis("Goal at Rejection")
+                .reset_index(name="Calls")
+                .set_index("Goal at Rejection")
+            )
+            st.bar_chart(stage_counts)
 
-            with col5:
-                st.caption("Last goal reached before rejection")
-                stage_counts = (
-                    pd.Series(
-                        [c["disconnect_stage"] or "No goal recorded" for c in rejection_calls],
-                        name="Stage",
-                    )
-                    .value_counts()
-                    .rename_axis("Goal at Rejection")
-                    .reset_index(name="Calls")
-                    .set_index("Goal at Rejection")
-                )
-                st.bar_chart(stage_counts)
-
-            with col6:
-                st.caption("Number of exchanges before rejection")
-                rejection_df = pd.DataFrame(
-                    [{"n_pairs": len(c["pairs"])} for c in rejection_calls]
-                )
-                bins = pd.cut(rejection_df["n_pairs"], bins=max(1, min(10, len(rejection_calls) // 2)))
-                bin_counts = (
-                    bins.value_counts()
-                    .sort_index()
-                    .rename_axis("Exchanges")
-                    .reset_index(name="Calls")
-                    .assign(Exchanges=lambda df: df["Exchanges"].astype(str))
-                    .set_index("Exchanges")
-                )
-                st.bar_chart(bin_counts)
+            st.markdown("**Number of exchanges before rejection**")
+            rejection_df = pd.DataFrame(
+                [{"n_pairs": len(c["pairs"])} for c in rejection_calls]
+            )
+            bins = pd.cut(rejection_df["n_pairs"], bins=max(1, min(10, len(rejection_calls) // 2)))
+            bin_counts = (
+                bins.value_counts()
+                .sort_index()
+                .rename_axis("Exchanges")
+                .reset_index(name="Calls")
+                .assign(Exchanges=lambda df: df["Exchanges"].astype(str))
+                .set_index("Exchanges")
+            )
+            st.bar_chart(bin_counts)
