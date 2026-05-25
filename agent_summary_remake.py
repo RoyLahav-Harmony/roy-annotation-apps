@@ -1,6 +1,9 @@
+import io
 import streamlit as st
 import json
 import pandas as pd
+from docx import Document
+from docx.shared import Pt, RGBColor
 
 st.set_page_config(page_title="Agent Script Summary", layout="wide")
 st.title("Agent Script Summary")
@@ -170,4 +173,49 @@ st.dataframe(
         "Utterances": st.column_config.TextColumn("Utterances (| separated)", width="large"),
         "# Variants": st.column_config.NumberColumn("# Variants", width="small"),
     },
+)
+
+# ── Word doc export ────────────────────────────────────────────────────────────
+def build_docx(data: pd.DataFrame) -> bytes:
+    doc = Document()
+    doc.add_heading("Agent Script Summary", level=1)
+
+    table = doc.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+
+    # Header row
+    hdr = table.rows[0].cells
+    for cell, text in zip(hdr, ["Goal", "Utterances", "# Variants"]):
+        cell.text = text
+        run = cell.paragraphs[0].runs[0]
+        run.bold = True
+        run.font.size = Pt(11)
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        cell._tc.get_or_add_tcPr().append(
+            __import__("lxml.etree", fromlist=["etree"]).etree.fromstring(
+                '<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+                ' w:val="clear" w:color="auto" w:fill="2E5FA3"/>'
+            )
+        )
+
+    # Data rows
+    for _, row in data.iterrows():
+        cells = table.add_row().cells
+        cells[0].text = str(row["Goal"])
+        cells[1].text = str(row["Utterances"])
+        cells[2].text = str(row["# Variants"])
+        for cell in cells:
+            cell.paragraphs[0].runs[0].font.size = Pt(10)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+st.markdown("---")
+st.download_button(
+    label="⬇️ Download as Word doc",
+    data=build_docx(filtered),
+    file_name="agent_script_summary.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 )
