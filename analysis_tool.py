@@ -1,3 +1,4 @@
+import math
 import streamlit as st
 import json
 import re
@@ -18,6 +19,23 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Plotly bar chart helper ────────────────────────────────────────────────────
+def pct_bar(labels, values, y_title="Calls", height=350):
+    total = sum(values)
+    text = [f"{v}  ({v / total * 100:.1f}%)" if total else str(v) for v in values]
+    fig = go.Figure(go.Bar(
+        x=labels, y=values,
+        text=text, textposition="inside",
+        textfont={"color": "white", "size": 13},
+    ))
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),
+        height=height,
+        yaxis_title=y_title,
+    )
+    return fig
+
 
 # ── Intent + confidence parser ─────────────────────────────────────────────────
 INTENT_RE = re.compile(
@@ -445,29 +463,22 @@ with tab3:
 
         # ── Outcome distribution ───────────────────────────────────────────────
         st.markdown("**Outcome distribution**")
-        outcome_counts = (
-            conv_df["outcome"]
-            .value_counts()
-            .rename_axis("Outcome")
-            .reset_index(name="Calls")
-            .set_index("Outcome")
-        )
-        st.bar_chart(outcome_counts)
+        oc = conv_df["outcome"].value_counts()
+        st.plotly_chart(pct_bar(oc.index.tolist(), oc.values.tolist()), use_container_width=True)
 
         st.markdown("---")
 
         # ── Call length distribution ───────────────────────────────────────────
         st.markdown("**Call length distribution (turns)**")
-        bins = pd.cut(conv_df["n_turns"], bins=10)
-        bin_counts = (
-            bins.value_counts()
-            .sort_index()
-            .rename_axis("Turns")
-            .reset_index(name="Calls")
-            .assign(Turns=lambda df: df["Turns"].astype(str))
-            .set_index("Turns")
-        )
-        st.bar_chart(bin_counts)
+        min_t = int(conv_df["n_turns"].min())
+        max_t = int(conv_df["n_turns"].max())
+        n_bins = min(10, max_t - min_t + 1)
+        step = max(1, math.ceil((max_t - min_t + 1) / n_bins))
+        bin_edges = list(range(min_t, max_t + step + 1, step))
+        cut_bins = pd.cut(conv_df["n_turns"], bins=bin_edges, include_lowest=True)
+        bc = cut_bins.value_counts().sort_index()
+        turn_labels = [f"{int(math.ceil(i.left))}–{int(i.right)}" for i in bc.index]
+        st.plotly_chart(pct_bar(turn_labels, bc.values.tolist()), use_container_width=True)
 
         st.markdown("---")
 
@@ -477,31 +488,25 @@ with tab3:
         if conf_series.empty:
             st.info("No confidence data for the selected outcomes.")
         else:
-            conf_bins = pd.cut(conf_series, bins=[0, 0.5, 0.7, 0.85, 0.95, 1.0],
-                               labels=["0–0.5", "0.5–0.7", "0.7–0.85", "0.85–0.95", "0.95–1.0"])
-            conf_counts = (
-                conf_bins.value_counts()
-                .sort_index()
-                .rename_axis("Confidence")
-                .reset_index(name="Pairs")
-                .set_index("Confidence")
-            )
-            st.bar_chart(conf_counts)
+            conf_labels = ["0–0.5", "0.5–0.7", "0.7–0.85", "0.85–0.95", "0.95–1.0"]
+            conf_bins = pd.cut(conf_series, bins=[0, 0.5, 0.7, 0.85, 0.95, 1.0], labels=conf_labels)
+            cc = conf_bins.value_counts().reindex(conf_labels).fillna(0).astype(int)
+            st.plotly_chart(pct_bar(cc.index.tolist(), cc.values.tolist(), y_title="Pairs"), use_container_width=True)
 
         st.markdown("---")
 
         # ── Avg turns by outcome ───────────────────────────────────────────────
         if len(selected_outcomes) > 1:
             st.markdown("**Average turns by outcome**")
-            avg_by_outcome = (
-                conv_df.groupby("outcome")["n_turns"]
-                .mean()
-                .round(1)
-                .rename_axis("Outcome")
-                .reset_index(name="Avg Turns")
-                .set_index("Outcome")
-            )
-            st.bar_chart(avg_by_outcome)
+            avg = conv_df.groupby("outcome")["n_turns"].mean().round(1)
+            fig_avg = go.Figure(go.Bar(
+                x=avg.index.tolist(), y=avg.values.tolist(),
+                text=[str(v) for v in avg.values.tolist()],
+                textposition="inside",
+                textfont={"color": "white", "size": 13},
+            ))
+            fig_avg.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=350, yaxis_title="Avg Turns")
+            st.plotly_chart(fig_avg, use_container_width=True)
 
             st.markdown("---")
 
@@ -512,29 +517,18 @@ with tab3:
             st.info("No rejection calls in the selected outcomes.")
         else:
             st.markdown("**Last goal reached before rejection**")
-            stage_counts = (
-                pd.Series(
-                    [c["disconnect_stage"] or "No goal recorded" for c in rejection_calls],
-                    name="Stage",
-                )
-                .value_counts()
-                .rename_axis("Goal at Rejection")
-                .reset_index(name="Calls")
-                .set_index("Goal at Rejection")
-            )
-            st.bar_chart(stage_counts)
+            sc_series = pd.Series(
+                [c["disconnect_stage"] or "No goal recorded" for c in rejection_calls]
+            ).value_counts()
+            st.plotly_chart(pct_bar(sc_series.index.tolist(), sc_series.values.tolist()), use_container_width=True)
 
             st.markdown("**Number of exchanges before rejection**")
-            rejection_df = pd.DataFrame(
-                [{"n_pairs": len(c["pairs"])} for c in rejection_calls]
-            )
-            bins = pd.cut(rejection_df["n_pairs"], bins=max(1, min(10, len(rejection_calls) // 2)))
-            bin_counts = (
-                bins.value_counts()
-                .sort_index()
-                .rename_axis("Exchanges")
-                .reset_index(name="Calls")
-                .assign(Exchanges=lambda df: df["Exchanges"].astype(str))
-                .set_index("Exchanges")
-            )
-            st.bar_chart(bin_counts)
+            rej_pairs = [len(c["pairs"]) for c in rejection_calls]
+            n_bins_r = max(1, min(10, len(rejection_calls) // 2))
+            min_r, max_r = min(rej_pairs), max(rej_pairs)
+            step_r = max(1, math.ceil((max_r - min_r + 1) / n_bins_r))
+            edges_r = list(range(min_r, max_r + step_r + 1, step_r))
+            cut_r = pd.cut(pd.Series(rej_pairs), bins=edges_r, include_lowest=True)
+            br = cut_r.value_counts().sort_index()
+            exch_labels = [f"{int(math.ceil(i.left))}–{int(i.right)}" for i in br.index]
+            st.plotly_chart(pct_bar(exch_labels, br.values.tolist()), use_container_width=True)
