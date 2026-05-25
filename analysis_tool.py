@@ -258,19 +258,25 @@ col9.metric("🔍 Calls with contact discovery", f"{n_cd_calls} ({n_cd_calls / t
 
 st.markdown("---")
 
-# ── Collect low-confidence pairs once ─────────────────────────────────────────
+# ── Collect low- and high-confidence pairs once ────────────────────────────────
 low_conf_pairs = []
+high_conf_pairs = []
 for conv in conversations:
     for pair in conv["pairs"]:
         conf = pair["Confidence"]
-        if isinstance(conf, float) and conf < 1.0:
-            low_conf_pairs.append({"chat_id": conv["chat_id"], **pair})
+        if isinstance(conf, float):
+            tagged = {"chat_id": conv["chat_id"], **pair}
+            if conf < 1.0:
+                low_conf_pairs.append(tagged)
+            elif conf == 1.0:
+                high_conf_pairs.append(tagged)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "All Conversations",
     f"Low Confidence Pairs ({len(low_conf_pairs)})",
     "Statistics",
+    "Review Dataset",
 ])
 
 # ── Tab 1: all conversations ───────────────────────────────────────────────────
@@ -650,3 +656,53 @@ with tab3:
             st.plotly_chart(pct_bar(list(frust_active.keys()), list(frust_active.values())), use_container_width=True)
         else:
             st.info("No frustration signals detected in the selected calls.")
+
+# ── Tab 4: review dataset ──────────────────────────────────────────────────────
+with tab4:
+    import random
+
+    n_low = len(low_conf_pairs)
+    n_high_available = len(high_conf_pairs)
+
+    st.markdown(
+        f"**{n_low}** pairs with confidence < 1  ·  "
+        f"**{n_high_available}** pairs with confidence = 1 available"
+    )
+
+    ratio = st.radio(
+        "Ratio of confidence = 1 pairs to add",
+        options=["0% (low-confidence only)", "50%", "100%", "150%"],
+        horizontal=True,
+    )
+
+    ratio_map = {
+        "0% (low-confidence only)": 0.0,
+        "50%": 0.5,
+        "100%": 1.0,
+        "150%": 1.5,
+    }
+    n_to_add = min(int(n_low * ratio_map[ratio]), n_high_available)
+
+    if st.button("🔀 Reshuffle"):
+        st.session_state["review_seed"] = random.randint(0, 999999)
+    seed = st.session_state.get("review_seed", 42)
+
+    rng = random.Random(seed)
+    sampled_high = rng.sample(high_conf_pairs, n_to_add) if n_to_add > 0 else []
+    combined = low_conf_pairs + sampled_high
+    rng.shuffle(combined)
+
+    st.caption(
+        f"Showing {len(low_conf_pairs)} low-confidence + {n_to_add} high-confidence pairs "
+        f"({len(combined)} total), shuffled."
+    )
+
+    if not combined:
+        st.info("No pairs to display.")
+    else:
+        display_cols = ["chat_id", "#", "User", "Agent", "Goal", "Intent", "Confidence"]
+        st.dataframe(
+            pd.DataFrame(combined)[display_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
