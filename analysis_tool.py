@@ -478,7 +478,17 @@ with tab3:
         cut_bins = pd.cut(conv_df["n_turns"], bins=bin_edges, include_lowest=True)
         bc = cut_bins.value_counts().sort_index()
         turn_labels = [f"{int(math.ceil(i.left))}–{int(i.right)}" for i in bc.index]
-        st.plotly_chart(pct_bar(turn_labels, bc.values.tolist()), use_container_width=True)
+        fig_tl = go.Figure(go.Scatter(
+            x=turn_labels, y=bc.values.tolist(),
+            mode="lines+markers",
+            line={"width": 3},
+            marker={"size": 8},
+        ))
+        fig_tl.update_layout(
+            margin=dict(l=0, r=0, t=10, b=0), height=350,
+            xaxis_title="Turns", yaxis_title="Calls",
+        )
+        st.plotly_chart(fig_tl, use_container_width=True)
 
         st.markdown("---")
 
