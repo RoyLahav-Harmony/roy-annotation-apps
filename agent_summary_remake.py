@@ -187,6 +187,9 @@ def build_docx(data: pd.DataFrame) -> bytes:
     doc = Document()
     doc.add_heading("Agent Script Summary", level=1)
 
+    for label in ["Company name:", "Location:", "Domain:", "Agent name:", "Overall description:", "Hand off:"]:
+        doc.add_paragraph(label)
+
     table = doc.add_table(rows=1, cols=3)
     table.style = "Table Grid"
 
