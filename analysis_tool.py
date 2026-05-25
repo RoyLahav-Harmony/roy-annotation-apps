@@ -27,7 +27,7 @@ def pct_bar(labels, values, y_title="Calls", height=350):
     fig = go.Figure(go.Bar(
         x=labels, y=values,
         text=text, textposition="inside",
-        textfont={"color": "white", "size": 13},
+        textfont={"color": "black", "size": 26},
     ))
     fig.update_layout(
         margin=dict(l=0, r=0, t=10, b=0),
@@ -503,7 +503,7 @@ with tab3:
                 x=avg.index.tolist(), y=avg.values.tolist(),
                 text=[str(v) for v in avg.values.tolist()],
                 textposition="inside",
-                textfont={"color": "white", "size": 13},
+                textfont={"color": "black", "size": 26},
             ))
             fig_avg.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=350, yaxis_title="Avg Turns")
             st.plotly_chart(fig_avg, use_container_width=True)
