@@ -277,16 +277,25 @@ for idx in range(len(low_conf_pairs)):
     st.session_state.setdefault(f"review_{idx}", None)
 st.session_state.setdefault("review_seed", 42)
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+# ── Navigation ─────────────────────────────────────────────────────────────────
+TAB_NAMES = [
     "All Conversations",
     f"Low Confidence Pairs ({len(low_conf_pairs)})",
     "Statistics",
     "Review Dataset",
-])
+]
+st.session_state.setdefault("active_tab", TAB_NAMES[0])
+
+active_tab = st.radio(
+    "nav", TAB_NAMES,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="active_tab",
+)
+st.markdown("---")
 
 # ── Tab 1: all conversations ───────────────────────────────────────────────────
-with tab1:
+if active_tab == TAB_NAMES[0]:
     search_col, filter_col = st.columns([3, 1])
     search = search_col.text_input("Search by call ID or utterance content")
     outcome_options = ["All"] + list(OUTCOME_EMOJI.keys()) + ["🔍 Contact Discovery"]
@@ -326,7 +335,7 @@ with tab1:
             st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
 # ── Tab 2: low-confidence pairs with review buttons ───────────────────────────
-with tab2:
+if active_tab == TAB_NAMES[1]:
     if not low_conf_pairs:
         st.info("No pairs with confidence below 1.0 found.")
     else:
@@ -372,7 +381,7 @@ with tab2:
             st.divider()
 
 # ── Tab 3: statistics ──────────────────────────────────────────────────────────
-with tab3:
+if active_tab == TAB_NAMES[2]:
     selected_outcomes = st.multiselect(
         "Filter by outcome",
         options=list(OUTCOME_EMOJI.keys()),
@@ -661,7 +670,7 @@ with tab3:
             st.info("No frustration signals detected in the selected calls.")
 
 # ── Tab 4: review dataset ──────────────────────────────────────────────────────
-with tab4:
+if active_tab == TAB_NAMES[3]:
     n_low = len(low_conf_pairs)
     n_high_available = len(high_conf_pairs)
 
