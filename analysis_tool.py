@@ -532,3 +532,86 @@ with tab3:
             br = cut_r.value_counts().sort_index()
             exch_labels = [f"{int(math.ceil(i.left))}–{int(i.right)}" for i in br.index]
             st.plotly_chart(pct_bar(exch_labels, br.values.tolist()), use_container_width=True)
+
+        st.markdown("---")
+
+        # ── User engagement depth ──────────────────────────────────────────────
+        st.markdown("**User Engagement Depth**")
+
+        def engagement_bucket(n):
+            if n <= 2:  return "Dropped after greeting (1–2)"
+            if n <= 5:  return "Short (3–5)"
+            if n <= 10: return "Medium (6–10)"
+            return "Deep (11+)"
+
+        bucket_order = ["Dropped after greeting (1–2)", "Short (3–5)", "Medium (6–10)", "Deep (11+)"]
+        buckets = pd.Series([engagement_bucket(len(c["pairs"])) for c in sc])
+        bucket_counts = buckets.value_counts().reindex(bucket_order).fillna(0).astype(int)
+        st.plotly_chart(pct_bar(bucket_counts.index.tolist(), bucket_counts.values.tolist()), use_container_width=True)
+
+        st.markdown("---")
+
+        # ── User confusion rate ────────────────────────────────────────────────
+        st.markdown("**User Confusion Rate**")
+
+        CONFUSION_SIGNALS = {
+            "What? / Huh?":     re.compile(r'\b(what\s*\?+|huh\s*\??)\b', re.I),
+            "Can you repeat?":  re.compile(r'\b(can you repeat|could you repeat|say that again|repeat (that|yourself))\b', re.I),
+            "Sorry / Pardon":   re.compile(r'\b(sorry\s*\?+|pardon\s*\??|excuse me\s*\?)\b', re.I),
+            "Repeated utterance": None,
+        }
+
+        def repeated_utterance(pairs):
+            msgs = [p["User"].strip().lower() for p in pairs if p["User"].strip()]
+            return len(msgs) != len(set(msgs))
+
+        conf_signal_counts = {sig: 0 for sig in CONFUSION_SIGNALS}
+        conf_calls = 0
+        for c in sc:
+            triggered = False
+            for sig, pattern in CONFUSION_SIGNALS.items():
+                if sig == "Repeated utterance":
+                    if repeated_utterance(c["pairs"]):
+                        conf_signal_counts[sig] += 1
+                        triggered = True
+                else:
+                    if any(pattern.search(p["User"]) for p in c["pairs"]):
+                        conf_signal_counts[sig] += 1
+                        triggered = True
+            if triggered:
+                conf_calls += 1
+
+        conf_pct = conf_calls / len(sc) * 100 if sc else 0
+        st.metric("Calls with confusion signals", f"{conf_calls} ({conf_pct:.1f}%)")
+        sig_labels = list(conf_signal_counts.keys())
+        sig_vals   = list(conf_signal_counts.values())
+        st.plotly_chart(pct_bar(sig_labels, sig_vals), use_container_width=True)
+
+        st.markdown("---")
+
+        # ── User frustration rate ──────────────────────────────────────────────
+        st.markdown("**User Frustration Rate**")
+
+        FRUSTRATION_SIGNALS = {
+            "Human / Representative": re.compile(r'\b(human please|speak to a human|talk to a human|talk to a person|real person|representative|speak to someone)\b', re.I),
+            "Stop":                   re.compile(r'\bstop\b', re.I),
+            "Not listening":          re.compile(r"\b(not listening|you'?re not listening|not understanding|you'?re not understanding)\b", re.I),
+            "Scam / Spam":            re.compile(r'\b(scam|spam|fraud|stop calling)\b', re.I),
+        }
+
+        frust_signal_counts = {sig: 0 for sig in FRUSTRATION_SIGNALS}
+        frust_calls = 0
+        for c in sc:
+            triggered = False
+            for sig, pattern in FRUSTRATION_SIGNALS.items():
+                if any(pattern.search(p["User"]) for p in c["pairs"]):
+                    frust_signal_counts[sig] += 1
+                    triggered = True
+            if triggered:
+                frust_calls += 1
+
+        frust_pct = frust_calls / len(sc) * 100 if sc else 0
+        st.metric("Calls with frustration signals", f"{frust_calls} ({frust_pct:.1f}%)")
+        fsig_labels = list(frust_signal_counts.keys())
+        fsig_vals   = list(frust_signal_counts.values())
+        st.plotly_chart(pct_bar(fsig_labels, fsig_vals), use_container_width=True)
