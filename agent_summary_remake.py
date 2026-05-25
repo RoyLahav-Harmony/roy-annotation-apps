@@ -182,6 +182,8 @@ st.dataframe(
 
 # ── Word doc export ────────────────────────────────────────────────────────────
 def build_docx(data: pd.DataFrame) -> bytes:
+    from lxml import etree
+
     doc = Document()
     doc.add_heading("Agent Script Summary", level=1)
 
@@ -196,12 +198,11 @@ def build_docx(data: pd.DataFrame) -> bytes:
         run.bold = True
         run.font.size = Pt(11)
         run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        cell._tc.get_or_add_tcPr().append(
-            __import__("lxml.etree", fromlist=["etree"]).etree.fromstring(
-                '<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-                ' w:val="clear" w:color="auto" w:fill="2E5FA3"/>'
-            )
+        shd = etree.fromstring(
+            '<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+            ' w:val="clear" w:color="auto" w:fill="2E5FA3"/>'
         )
+        cell._tc.get_or_add_tcPr().append(shd)
 
     # Data rows
     for _, row in data.iterrows():
