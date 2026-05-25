@@ -17,6 +17,11 @@ if not pasted.strip():
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+def safe_str(value, default=""):
+    """Return value as a stripped string, or default if it's not a string."""
+    return value.strip() if isinstance(value, str) else default
+
+
 def extract_messages(field):
     """Return a flat list of non-empty utterance strings from any messages format."""
     if not field:
@@ -29,7 +34,7 @@ def extract_messages(field):
             if isinstance(m, str) and m.strip():
                 out.append(m.strip())
             elif isinstance(m, dict):
-                text = m.get("message", "").strip()
+                text = safe_str(m.get("message", ""))
                 if text:
                     out.append(text)
         return out
@@ -46,7 +51,7 @@ def walk_goals(goals, parent_path=""):
         if goal.get("enabled") is False:
             continue
 
-        name = goal.get("name", "").strip()
+        name = safe_str(goal.get("name", ""))
         path = parent_path if goal.get("appended") and parent_path else (
             f"{parent_path} / {name}" if parent_path else name
         )
@@ -64,8 +69,8 @@ def walk_goals(goals, parent_path=""):
         yield from walk_goals(goal.get("goals", []), path)
 
         for choice in (goal.get("choices") or []):
-            choice_name = choice.get("name", "").strip()
-            ack = choice.get("acknowledge", "").strip()
+            choice_name = safe_str(choice.get("name", ""))
+            ack = safe_str(choice.get("acknowledge", ""))
             if ack:
                 yield f"{path} = {choice_name} acknowledge", [ack]
             choice_path = f"{path} / {choice_name}" if choice_name else path
