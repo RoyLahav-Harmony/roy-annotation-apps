@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timezone
 
-st.set_page_config(page_title="Calls Extracted", layout="wide")
+st.set_page_config(page_title="Analysis Tool", layout="wide")
 st.title("Extracted Call Conversations")
 
 st.markdown("""
