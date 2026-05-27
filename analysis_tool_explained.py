@@ -1,15 +1,24 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# analysis_tool_explained.py
+# Annotated version of analysis_tool.py for documentation purposes.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Standard library and third-party imports.
 import math
 import random
-import streamlit as st
+import streamlit as st   # The web app framework — every 'st.' call renders something in the browser.
 import json
 import re
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timezone
 
+# Set the browser tab title and use the full screen width.
 st.set_page_config(page_title="Analysis Tool", layout="wide")
 st.title("Extracted Call Conversations")
 
+# ── Global CSS tweak ──────────────────────────────────────────────────────────
+# Makes the small label text above metric cards larger so they're easier to read.
 st.markdown("""
 <style>
 [data-testid="stMetricLabel"] p,
@@ -21,9 +30,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Plotly bar chart helper ────────────────────────────────────────────────────
+
+# ── Bar chart helper ──────────────────────────────────────────────────────────
+# Builds a Plotly bar chart where each bar also shows its count and % of total.
+# Used throughout the Statistics tab for all distributions.
 def pct_bar(labels, values, y_title="Calls", height=350):
     total = sum(values)
+    # Format each bar label as "count  (X.X%)"
     text = [f"{v}  ({v / total * 100:.1f}%)" if total else str(v) for v in values]
     fig = go.Figure(go.Bar(
         x=labels, y=values,
@@ -38,30 +51,30 @@ def pct_bar(labels, values, y_title="Calls", height=350):
     return fig
 
 
-# ── Log parsers for confidence signals ────────────────────────────────────────
+# ── Intent confidence regex ───────────────────────────────────────────────────
+# Matches log lines like:
+#   "(~0.01) detected intent "%sorry_what%" as "Sorry, what?" 0.93%"
+# Captures: group(1) = intent slug, group(2) = confidence value (e.g. "0.93")
 INTENT_RE = re.compile(
     r'detected (?:hard-coded )?intent "([^"]+)" as "[^"]+" ([\d.]+)%'
 )
-VOICE_INTENT_RE = re.compile(r'detected voice_intent "[^"]+" as "[^"]+" ([\d.]+)%')
-GOAL_TRIGGER_RE = re.compile(r'Goal "[^"]+" considered by TRIGGER "[^"]+" ([\d.]+)%')
-# NLI log entries are multi-line strings; the verdict appears after the last "=>".
-# Greedy .* with DOTALL crosses newlines and backtracks to the final "=> label score".
-NLI_RE = re.compile(
-    r'\bNLI\b.*=>[ \t]*(entailment|neutral|contradiction)(?:[= (]+)([\d.]+)',
-    re.IGNORECASE | re.DOTALL,
-)
 
-# ── Call datetime parser ───────────────────────────────────────────────────────
+# Regex to extract a datetime string from the first line of the voice_debug_log.
 _LOG_DT_RE = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 
+
 def extract_call_datetime(history: dict, items: list) -> datetime | None:
-    # Prefer the start timestamp from the first debug log line.
+    """
+    Try to find the actual start time of the call.
+    First choice: the first line of the voice_debug_log, which contains a timestamp.
+    Fallback: the earliest last_user_message_timestamp across all chat items.
+    """
     log = history.get("voice_debug_log") or []
     if log:
         m = _LOG_DT_RE.search(log[0])
         if m:
             return datetime.fromisoformat(m.group(1)).replace(tzinfo=timezone.utc)
-    # Fall back to the earliest last_user_message_timestamp in the items.
+    # Walk all items to find the earliest timestamp if the log didn't have one.
     ts = None
     for item in items:
         ds = item.get("director_state") or {}
@@ -70,78 +83,50 @@ def extract_call_datetime(history: dict, items: list) -> datetime | None:
             ts = t
     return datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
 
+
 def parse_intent(log_lines):
+    """
+    Scan the log lines for a user turn and return (intent, confidence).
+    Stops at the FIRST matching line — usually the most recent detection.
+    Returns (None, None) if no matching line is found.
+    """
     for line in (log_lines or []):
         m = INTENT_RE.search(line)
         if m:
             return m.group(1), float(m.group(2))
     return None, None
 
-def parse_voice_intent(log_lines):
-    for line in (log_lines or []):
-        m = VOICE_INTENT_RE.search(line)
-        if m:
-            return float(m.group(1))
-    return None
 
-def parse_goal_trigger(log_lines):
-    for line in (log_lines or []):
-        m = GOAL_TRIGGER_RE.search(line)
-        if m:
-            return float(m.group(1))
-    return None
+# ── Outcome classifier — goal path constants ──────────────────────────────────
+# These sets contain the goal_path values that identify each outcome.
+# A "goal_path" is a string path in the agent's script tree that shows
+# which script node the agent was executing at any given moment.
 
-def parse_nli(log_lines):
-    for line in (log_lines or []):
-        m = NLI_RE.search(line)
-        if m:
-            return m.group(1).lower(), float(m.group(2))
-    return None, None
-
-# Weights for the four signals, normalised to sum to 1.0.
-# Derived from the raw ratios 50:25:15:5 (÷95 each) so relative proportions are preserved.
-_SIGNAL_WEIGHTS = {"nli": 0.5263, "intent": 0.2632, "voice": 0.1579, "trigger": 0.0526}
-
-def compute_unified_confidence(intent_conf, voice_conf, trigger_conf, nli_label, nli_score):
-    scores = {}
-    if intent_conf  is not None: scores["intent"]  = intent_conf
-    if voice_conf   is not None: scores["voice"]   = voice_conf
-    if trigger_conf is not None: scores["trigger"] = trigger_conf
-    if nli_score is not None and nli_label is not None:
-        # entailment/contradiction = clear signal → use score directly.
-        # neutral = confident ambiguity → invert so high-certainty ambiguity scores low.
-        scores["nli"] = nli_score if nli_label in ("entailment", "contradiction") else 1.0 - nli_score
-    if not scores:
-        return None
-    total_w = sum(_SIGNAL_WEIGHTS[k] for k in scores)
-    unified = sum(scores[k] * _SIGNAL_WEIGHTS[k] / total_w for k in scores)
-    # Penalty when text intent and voice intent disagree significantly.
-    if "intent" in scores and "voice" in scores:
-        unified -= 0.10 * abs(scores["intent"] - scores["voice"])
-    return round(max(0.0, unified), 4)
-
-
-# ── Outcome classifier ─────────────────────────────────────────────────────────
-# These paths confirm a meeting was successfully scheduled — checked across ALL turns.
+# Any of these paths appearing anywhere in the call = meeting was booked.
 _CONFIRMED_SCHEDULING_PATHS = {
     "voice goals end of call/scheduling-via-voice/confirm meeting time",
     "voice goals end of call/scheduling-via-voice/perform scheduling",
     "post scheduling help",
 }
+# The caller agreed to receive a callback instead of scheduling now.
 _CALLBACK_PATHS = {
     "base_agents/voice_agents/schedule-callback/callback slot",
 }
+# The call was transferred to a human agent.
 _TRANSFERRED_PATHS = {
     "base_agents/outbound agents/transfer to customer",
 }
+# Any goal_path starting with this prefix = agent left a voicemail.
 _VOICEMAIL_PREFIXES = (
     "base_agents/outbound agents/voicemail",
 )
+# These are polite hang-up paths — excluded when finding the last meaningful goal.
 _HANGUP_PATHS = {
     "base_agents/voice_agents/hang up",
     "base_agents/voice_agents/hang up - bad number",
 }
 
+# Emoji displayed next to each outcome label in the UI.
 OUTCOME_EMOJI = {
     "Converted": "✅",
     "Callback Scheduled": "📅",
@@ -152,11 +137,15 @@ OUTCOME_EMOJI = {
 
 
 def extract_outcome(items: list) -> tuple[str, str | None]:
-    """Returns (outcome, disconnect_stage).
-
-    disconnect_stage is the last meaningful goal before a rejection, used for
-    disconnect distribution analysis. None for all other outcomes.
     """
+    Determine the final outcome of a call by scanning all goal_paths.
+    Returns (outcome_label, disconnect_stage).
+
+    - outcome_label: one of the five outcomes above.
+    - disconnect_stage: for Rejections only — the last meaningful goal reached
+      before the call ended (used in the Statistics tab disconnect chart).
+    """
+    # Collect every goal_path seen across all turns in this conversation.
     all_goal_paths = []
     for item in items:
         ds = item.get("director_state") or {}
@@ -165,14 +154,14 @@ def extract_outcome(items: list) -> tuple[str, str | None]:
         if gp:
             all_goal_paths.append(gp)
 
-    # Conversion wins regardless of what happened after (e.g. polite hang-up).
+    # Check for conversion first — it wins even if a hang-up happened afterwards.
     if any(gp in _CONFIRMED_SCHEDULING_PATHS for gp in all_goal_paths):
         return "Converted", None
 
-    # Callback scheduled — caller agreed to a callback instead of a meeting.
     if any(gp in _CALLBACK_PATHS for gp in all_goal_paths):
         return "Callback Scheduled", None
 
+    # For the remaining outcomes, only the LAST goal_path matters.
     last_goal_path = all_goal_paths[-1] if all_goal_paths else None
 
     if last_goal_path in _TRANSFERRED_PATHS:
@@ -180,8 +169,8 @@ def extract_outcome(items: list) -> tuple[str, str | None]:
     if last_goal_path and last_goal_path.startswith(_VOICEMAIL_PREFIXES):
         return "Voicemail", None
 
-    # Everything else with any utterance activity is a rejection — caller either
-    # disconnected before scheduling or refused to schedule.
+    # Everything else is a Rejection.
+    # Find the last meaningful goal (ignoring hang-up paths) for the disconnect chart.
     stage = next(
         (gp for gp in reversed(all_goal_paths) if gp not in _HANGUP_PATHS),
         None,
@@ -189,36 +178,47 @@ def extract_outcome(items: list) -> tuple[str, str | None]:
     return "Rejection", stage
 
 
-# ── Data loading ───────────────────────────────────────────────────────────────
+# ── Data loading ──────────────────────────────────────────────────────────────
+# @st.cache_data means this function only runs once per unique file upload.
+# If the same file is uploaded again, Streamlit returns the cached result.
 @st.cache_data
 def load_conversations(content: bytes):
+    """
+    Parse the uploaded JSON file and return a list of conversation dicts.
+
+    Input JSON structure:
+      { "agent_name": [ { "chat_id": "...", "history": { "chat_items": [...] } }, ... ] }
+
+    Each chat_item has:
+      - "speaker": "user" or "assistant"
+      - "content": the utterance text
+      - "director_state": internal agent state, including last_behavior → log (for confidence)
+    """
     raw = json.loads(content)
     conversations = []
+
+    # Top level is a dict keyed by agent name, each value is a list of chats.
     for agent_name, chats in raw.items():
         for chat in chats:
             chat_id = chat.get("chat_id", "unknown")
             history = chat.get("history", {})
             items = history.get("chat_items", [])
 
+            # Build a flat list of turns, skipping any item with empty content.
             turns = []
             for item in items:
                 speaker = item.get("speaker", "")
                 content = item.get("content", "").strip()
                 if not content:
-                    continue
+                    continue  # Skip silent turns (e.g. immediate hangups)
 
                 intent, confidence, goal = None, None, None
                 if speaker == "user":
+                    # Only user turns carry intent/confidence data.
+                    # director_state → last_behavior → log contains the detection lines.
                     ds = item.get("director_state") or {}
                     lb = ds.get("last_behavior") or {}
-                    log = lb.get("log", [])
-                    intent, intent_conf  = parse_intent(log)
-                    voice_conf           = parse_voice_intent(log)
-                    trigger_conf         = parse_goal_trigger(log)
-                    nli_label, nli_score = parse_nli(log)
-                    confidence = compute_unified_confidence(
-                        intent_conf, voice_conf, trigger_conf, nli_label, nli_score
-                    )
+                    intent, confidence = parse_intent(lb.get("log", []))
                     goal = lb.get("goal_path") or None
 
                 turns.append({
@@ -229,12 +229,14 @@ def load_conversations(content: bytes):
                     "goal": goal,
                 })
 
-            # Skip calls with no utterances — nothing useful to show or analyse.
+            # If a call had no audible speech at all, skip it entirely.
             if not turns:
                 continue
 
             outcome, disconnect_stage = extract_outcome(items)
 
+            # Build "pairs": each pair = one user turn + the agent turn that follows it.
+            # Also track the previous agent turn so it can be shown in the review dataset.
             pairs = []
             prev_agent = ""
             i = 0
@@ -246,13 +248,14 @@ def load_conversations(content: bytes):
                     confidence = t["confidence"]
                     goal = t["goal"]
                     agent_text = ""
+                    # Peek ahead: if the next turn is the agent responding, grab it.
                     if i + 1 < len(turns) and turns[i + 1]["speaker"] == "assistant":
                         agent_text = turns[i + 1]["content"]
-                        i += 2
+                        i += 2  # Consumed both the user and agent turn.
                     else:
                         i += 1
                     pairs.append({
-                        "#": len(pairs) + 1,
+                        "#": len(pairs) + 1,        # Turn number within this conversation.
                         "Prev Agent": prev_agent or "—",
                         "User": user_text,
                         "Agent": agent_text,
@@ -262,6 +265,7 @@ def load_conversations(content: bytes):
                     })
                     prev_agent = agent_text
                 else:
+                    # Agent-only turn (no preceding user message) — just track it as prev.
                     if t["content"]:
                         prev_agent = t["content"]
                     i += 1
@@ -278,47 +282,55 @@ def load_conversations(content: bytes):
     return conversations
 
 
-# ── Load ───────────────────────────────────────────────────────────────────────
+# ── File upload ───────────────────────────────────────────────────────────────
+# st.stop() halts execution below this point until the user provides a file.
 uploaded = st.file_uploader("Upload a calls JSON file", type=["json"])
 if uploaded is None:
     st.info("Upload a calls export JSON file to begin.")
     st.stop()
 
+# Parse the file. If it's malformed JSON, show an error and stop.
 try:
     conversations = load_conversations(uploaded.read())
 except Exception as e:
     st.error(f"Could not parse file: {e}")
     st.stop()
 
+# ── Summary counts for the header metrics ─────────────────────────────────────
 total = len(conversations)
 with_pairs = sum(1 for c in conversations if c["pairs"])
-n_converted = sum(1 for c in conversations if c["outcome"] == "Converted")
-n_callback = sum(1 for c in conversations if c["outcome"] == "Callback Scheduled")
-n_transferred = sum(1 for c in conversations if c["outcome"] == "Transferred")
-n_voicemail = sum(1 for c in conversations if c["outcome"] == "Voicemail")
-n_rejection = sum(1 for c in conversations if c["outcome"] == "Rejection")
+n_converted  = sum(1 for c in conversations if c["outcome"] == "Converted")
+n_callback   = sum(1 for c in conversations if c["outcome"] == "Callback Scheduled")
+n_transferred= sum(1 for c in conversations if c["outcome"] == "Transferred")
+n_voicemail  = sum(1 for c in conversations if c["outcome"] == "Voicemail")
+n_rejection  = sum(1 for c in conversations if c["outcome"] == "Rejection")
+# Contact Discovery = calls where the agent attempted to find out the contact name.
 n_cd_calls = sum(
     1 for c in conversations
     if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])
 )
 
+# Display the metrics in a row across the top.
 col1, = st.columns(1)
 col1.metric("Total conversations", total)
 
 col4, col5, col6, col7, col8 = st.columns(5)
-col4.metric("✅ Converted", n_converted)
-col5.metric("📅 Callback Scheduled", n_callback)
-col6.metric("🔀 Transferred", n_transferred)
-col7.metric("📬 Voicemail", n_voicemail)
-col8.metric("🚫 Rejection", n_rejection)
+col4.metric("✅ Converted",           n_converted)
+col5.metric("📅 Callback Scheduled",  n_callback)
+col6.metric("🔀 Transferred",         n_transferred)
+col7.metric("📬 Voicemail",           n_voicemail)
+col8.metric("🚫 Rejection",           n_rejection)
 
 col9, = st.columns(1)
 col9.metric("🔍 Calls with contact discovery", f"{n_cd_calls} ({n_cd_calls / total * 100:.1f}%)" if total else "0")
 
 st.markdown("---")
 
-# ── Collect low- and high-confidence pairs once ────────────────────────────────
-low_conf_pairs = []
+# ── Pre-compute confidence buckets ────────────────────────────────────────────
+# Split all pairs across all conversations into low-confidence (< 1.0)
+# and high-confidence (exactly 1.0). Used in both the Low Confidence tab
+# and the Review Dataset tab.
+low_conf_pairs  = []
 high_conf_pairs = []
 for conv in conversations:
     for pair in conv["pairs"]:
@@ -330,12 +342,17 @@ for conv in conversations:
             elif conf == 1.0:
                 high_conf_pairs.append(tagged)
 
-# ── Pre-initialise all session state to avoid tab resets on first interaction ──
+# ── Session state initialisation ──────────────────────────────────────────────
+# Pre-populate all review keys so that switching tabs doesn't reset them.
+# setdefault only writes if the key doesn't already exist.
 for idx in range(len(low_conf_pairs)):
     st.session_state.setdefault(f"review_{idx}", None)
 st.session_state.setdefault("review_seed", 42)
 
-# ── Navigation ─────────────────────────────────────────────────────────────────
+# ── Tab navigation ────────────────────────────────────────────────────────────
+# Streamlit's native st.tabs resets on first interaction, so we use a radio
+# button as a manual tab bar instead. The selected value is stored in
+# session_state under "active_tab".
 TAB_NAMES = [
     "All Conversations",
     f"Low Confidence Pairs ({len(low_conf_pairs)})",
@@ -352,7 +369,12 @@ active_tab = st.radio(
 )
 st.markdown("---")
 
-# ── Tab 1: all conversations ───────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — All Conversations
+# Shows every conversation in a searchable, filterable list.
+# Each conversation is collapsed by default; click to expand and see the table.
+# ══════════════════════════════════════════════════════════════════════════════
 if active_tab == TAB_NAMES[0]:
     search_col, filter_col = st.columns([3, 1])
     search = search_col.text_input("Search by call ID or utterance content")
@@ -360,10 +382,12 @@ if active_tab == TAB_NAMES[0]:
     outcome_filter = filter_col.selectbox("Filter by outcome", outcome_options)
 
     filtered = conversations
+    # Apply outcome filter first.
     if outcome_filter == "🔍 Contact Discovery":
         filtered = [c for c in filtered if any(p["Goal"] == "base_agents/contact discovery" for p in c["pairs"])]
     elif outcome_filter != "All":
         filtered = [c for c in filtered if c["outcome"] == outcome_filter]
+    # Then apply text search across chat_id and all user/agent utterances.
     if search:
         q = search.lower()
         filtered = [
@@ -374,6 +398,7 @@ if active_tab == TAB_NAMES[0]:
     if search or outcome_filter != "All":
         st.caption(f"{len(filtered)} matching conversation(s)")
 
+    # Each conversation is a collapsible expander showing outcome, timestamp, and pairs table.
     for conv in filtered:
         chat_id = conv["chat_id"]
         pairs = conv["pairs"]
@@ -392,7 +417,13 @@ if active_tab == TAB_NAMES[0]:
                 continue
             st.dataframe(pd.DataFrame(pairs), use_container_width=True, hide_index=True)
 
-# ── Tab 2: low-confidence pairs with review buttons ───────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Low Confidence Pairs
+# Lists every user–agent exchange where the intent confidence was below 1.0.
+# Reviewers can mark each pair as Correct, Partial, or Incorrect.
+# These marks are stored in session_state but NOT exported from this tab.
+# ══════════════════════════════════════════════════════════════════════════════
 if active_tab == TAB_NAMES[1]:
     if not low_conf_pairs:
         st.info("No pairs with confidence below 1.0 found.")
@@ -401,7 +432,7 @@ if active_tab == TAB_NAMES[1]:
             f"{len(low_conf_pairs)} pair(s) with intent confidence < 1.0 across all conversations."
         )
 
-        # Header row
+        # Render a manual header row to label the columns.
         h0, h1, h2, h3, h4, h5, h6, h7, h8 = st.columns([2, 2, 2, 2, 1.5, 1, 0.8, 1, 1])
         for col, label in zip(
             [h0, h1, h2, h3, h4, h5, h6, h7, h8],
@@ -412,6 +443,7 @@ if active_tab == TAB_NAMES[1]:
 
         for idx, pair in enumerate(low_conf_pairs):
             key = f"review_{idx}"
+            # Each pair gets 10 columns: data fields + 3 action buttons.
             c0, c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([2, 2, 2, 2, 1.5, 1, 0.8, 1, 1.2, 1.1])
             c0.write(pair["chat_id"])
             c1.write(pair["Prev Agent"])
@@ -421,13 +453,15 @@ if active_tab == TAB_NAMES[1]:
             c5.write(pair["Intent"])
             c6.write(f'{pair["Confidence"]:.2f}')
 
-            if c7.button("✔ Correct",  key=f"{key}_ok",      type="primary"):
+            # Buttons store the verdict in session_state using a unique key per row.
+            if c7.button("✔ Correct",   key=f"{key}_ok",      type="primary"):
                 st.session_state[key] = "correct"
-            if c8.button("± Partial",  key=f"{key}_partial", type="secondary"):
+            if c8.button("± Partial",   key=f"{key}_partial", type="secondary"):
                 st.session_state[key] = "partial"
-            if c9.button("✘ Incorrect", key=f"{key}_bad",    type="secondary"):
+            if c9.button("✘ Incorrect", key=f"{key}_bad",     type="secondary"):
                 st.session_state[key] = "incorrect"
 
+            # Show a coloured confirmation below the row based on the stored verdict.
             verdict = st.session_state[key]
             if verdict == "correct":
                 st.success("Marked: Correct", icon="✔")
@@ -438,7 +472,11 @@ if active_tab == TAB_NAMES[1]:
 
             st.divider()
 
-# ── Tab 3: statistics ──────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Statistics
+# All charts on this tab respect the outcome filter at the top.
+# ══════════════════════════════════════════════════════════════════════════════
 if active_tab == TAB_NAMES[2]:
     selected_outcomes = st.multiselect(
         "Filter by outcome",
@@ -447,12 +485,13 @@ if active_tab == TAB_NAMES[2]:
         format_func=lambda o: f"{OUTCOME_EMOJI[o]} {o}",
     )
 
+    # sc = "selected conversations" — the filtered subset for all charts below.
     sc = [c for c in conversations if c["outcome"] in selected_outcomes]
 
     if not sc:
         st.info("No conversations match the selected outcomes.")
     else:
-        # ── Build DataFrames ───────────────────────────────────────────────────
+        # Build two DataFrames: one per-conversation, one per-pair.
         conv_df = pd.DataFrame([
             {"outcome": c["outcome"], "n_turns": c["n_turns"], "n_pairs": len(c["pairs"])}
             for c in sc
@@ -463,6 +502,7 @@ if active_tab == TAB_NAMES[2]:
             for p in c["pairs"]:
                 pair_rows.append({
                     "outcome": c["outcome"],
+                    # Only include numeric confidence values; skip "—" strings.
                     "confidence": p["Confidence"] if isinstance(p["Confidence"], float) else None,
                 })
         pairs_df = pd.DataFrame(pair_rows)
@@ -481,18 +521,19 @@ if active_tab == TAB_NAMES[2]:
         )
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Calls (filtered)", len(sc))
-        m2.metric("Avg turns / call", f"{conv_df['n_turns'].mean():.1f}")
+        m1.metric("Calls (filtered)",     len(sc))
+        m2.metric("Avg turns / call",     f"{conv_df['n_turns'].mean():.1f}")
         m3.metric("Avg exchanges / call", f"{conv_df['n_pairs'].mean():.1f}")
-        m4.metric("Conversion rate", f"{conv_rate:.1f}%")
+        m4.metric("Conversion rate",      f"{conv_rate:.1f}%")
 
         m5, m6 = st.columns(2)
-        m5.metric("🔍 Calls with contact discovery", f"{cd_calls} ({cd_calls / len(sc) * 100:.1f}%)")
-        m6.metric("🔍 Contact discovery utterances", cd_utterances)
+        m5.metric("🔍 Calls with contact discovery",    f"{cd_calls} ({cd_calls / len(sc) * 100:.1f}%)")
+        m6.metric("🔍 Contact discovery utterances",    cd_utterances)
 
         st.markdown("---")
 
-        # ── Goal funnel ────────────────────────────────────────────────────────
+        # ── Goal Funnel ────────────────────────────────────────────────────────
+        # Shows how many calls reached each progressive stage of the sales flow.
         st.markdown("**Goal Funnel Drop-off**")
 
         _DM_REACHED_GOALS = {
@@ -510,12 +551,13 @@ if active_tab == TAB_NAMES[2]:
             "voice goals end of call/scheduling-via-voice/pre-scheduling-goals/confirm last name",
         }
 
+        # Each stage is a (label, lambda) pair — the lambda checks if a call reached that stage.
         funnel_stages = [
-            ("Connected",             lambda _: True),
-            ("Reached Decision Maker",lambda goals: bool(goals & _DM_REACHED_GOALS)),
-            ("Contact Discovery",     lambda goals: bool(goals & _DISCOVERY_GOALS)),
-            ("Scheduling Initiated",  lambda goals: bool(goals & _SCHEDULING_GOALS)),
-            ("Meeting Confirmed",     lambda goals: bool(goals & _CONFIRMED_SCHEDULING_PATHS)),
+            ("Connected",              lambda _: True),
+            ("Reached Decision Maker", lambda goals: bool(goals & _DM_REACHED_GOALS)),
+            ("Contact Discovery",      lambda goals: bool(goals & _DISCOVERY_GOALS)),
+            ("Scheduling Initiated",   lambda goals: bool(goals & _SCHEDULING_GOALS)),
+            ("Meeting Confirmed",      lambda goals: bool(goals & _CONFIRMED_SCHEDULING_PATHS)),
         ]
 
         funnel_counts = []
@@ -545,6 +587,7 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── Call length distribution ───────────────────────────────────────────
+        # Bins calls by number of turns, then plots as a line chart.
         st.markdown("**Call length distribution (turns)**")
         min_t = int(conv_df["n_turns"].min())
         max_t = int(conv_df["n_turns"].max())
@@ -569,6 +612,7 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── Confidence score distribution ──────────────────────────────────────
+        # Bins all user-turn confidence scores into five fixed ranges.
         st.markdown("**Confidence score distribution**")
         conf_series = pairs_df["confidence"].dropna()
         if conf_series.empty:
@@ -582,6 +626,7 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── Avg turns by outcome ───────────────────────────────────────────────
+        # Only shown when more than one outcome type is selected (otherwise meaningless).
         if len(selected_outcomes) > 1:
             st.markdown("**Average turns by outcome**")
             avg = conv_df.groupby("outcome")["n_turns"].mean().round(1)
@@ -596,7 +641,8 @@ if active_tab == TAB_NAMES[2]:
 
             st.markdown("---")
 
-        # ── Disconnect stage distribution (rejection calls only) ───────────────
+        # ── Rejection disconnect stage ─────────────────────────────────────────
+        # Shows at which script node the caller typically dropped off.
         st.markdown("**🚫 Where in the call did rejections happen?**")
         rejection_calls = [c for c in sc if c["outcome"] == "Rejection"]
         if not rejection_calls:
@@ -622,6 +668,7 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── User engagement depth ──────────────────────────────────────────────
+        # Buckets calls by how many exchanges happened — a proxy for how engaged the caller was.
         st.markdown("**User Engagement Depth**")
 
         def engagement_bucket(n):
@@ -638,6 +685,8 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── User confusion rate ────────────────────────────────────────────────
+        # Detects calls where the user showed signs of not understanding the agent.
+        # Each signal is a named regex pattern; "Repeated utterance" is a special case.
         st.markdown("**User Confusion Rate**")
 
         CONFUSION_SIGNALS = {
@@ -653,10 +702,13 @@ if active_tab == TAB_NAMES[2]:
                 r'\b(pardon\s*\??|excuse me\s*\??|sorry\s*\?+|i beg your pardon|beg your pardon)\b', re.I),
             "Clarification request": re.compile(
                 r"\b(what do you mean by|can you (clarify|explain)|could you (clarify|explain)|not sure (what|i understand)|what exactly|what specifically)\b", re.I),
+            # Special case: detected by comparing all user utterances for duplicates,
+            # not by a regex match.
             "Repeated utterance": None,
         }
 
         def repeated_utterance(pairs):
+            # Returns True if any user message was said more than once in the call.
             msgs = [p["User"].strip().lower() for p in pairs if p["User"].strip()]
             return len(msgs) != len(set(msgs))
 
@@ -687,6 +739,7 @@ if active_tab == TAB_NAMES[2]:
         st.markdown("---")
 
         # ── User frustration rate ──────────────────────────────────────────────
+        # Similar to confusion, but detects hostility, refusals, and hang-up threats.
         st.markdown("**User Frustration Rate**")
 
         FRUSTRATION_SIGNALS = {
@@ -727,7 +780,13 @@ if active_tab == TAB_NAMES[2]:
         else:
             st.info("No frustration signals detected in the selected calls.")
 
-# ── Tab 4: review dataset ──────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Review Dataset
+# Builds a curated dataset for human annotation.
+# Always includes all low-confidence pairs; optionally mixes in high-confidence
+# pairs at a chosen ratio so annotators don't know which is which (blind review).
+# ══════════════════════════════════════════════════════════════════════════════
 if active_tab == TAB_NAMES[3]:
     n_low = len(low_conf_pairs)
     n_high_available = len(high_conf_pairs)
@@ -737,6 +796,7 @@ if active_tab == TAB_NAMES[3]:
         f"**{n_high_available}** pairs with confidence = 1 available"
     )
 
+    # The user picks what fraction of high-confidence pairs to mix in.
     ratio = st.radio(
         "Ratio of confidence = 1 pairs to add",
         options=["0% (low-confidence only)", "50%", "100%", "150%"],
@@ -749,16 +809,21 @@ if active_tab == TAB_NAMES[3]:
         "100%": 1.0,
         "150%": 1.5,
     }
+    # Cap at however many high-conf pairs are actually available.
     n_to_add = min(int(n_low * ratio_map[ratio]), n_high_available)
 
+    # The Reshuffle button changes the random seed, which changes which high-conf
+    # pairs are sampled and how the final list is ordered — without changing
+    # the low-conf pairs (they're always all included).
     if st.button("🔀 Reshuffle"):
         st.session_state["review_seed"] = random.randint(0, 999999)
     seed = st.session_state.get("review_seed", 42)
 
+    # Use a seeded random so the shuffle is reproducible until Reshuffle is pressed.
     rng = random.Random(seed)
     sampled_high = rng.sample(high_conf_pairs, n_to_add) if n_to_add > 0 else []
     combined = low_conf_pairs + sampled_high
-    rng.shuffle(combined)
+    rng.shuffle(combined)  # Interleave so high/low pairs aren't grouped together.
 
     st.caption(
         f"Showing {len(low_conf_pairs)} low-confidence + {n_to_add} high-confidence pairs "
@@ -768,6 +833,7 @@ if active_tab == TAB_NAMES[3]:
     if not combined:
         st.info("No pairs to display.")
     else:
+        # Show the table WITHOUT the Confidence column — hidden to avoid annotator bias.
         display_cols = ["chat_id", "#", "Prev Agent", "User", "Agent", "Goal", "Intent", "Confidence"]
         st.dataframe(
             pd.DataFrame(combined)[display_cols],
@@ -776,6 +842,7 @@ if active_tab == TAB_NAMES[3]:
         )
 
         st.markdown("---")
+        # Download button exports the full combined list as JSON (Confidence IS included).
         st.download_button(
             label="⬇️ Download as JSON",
             data=json.dumps(combined, ensure_ascii=False, indent=2),

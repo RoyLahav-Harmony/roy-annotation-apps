@@ -1,0 +1,444 @@
+UNIFIED CONFIDENCE SCORE — DESIGN DOCUMENT
+==========================================
+A framework for combining multiple system signals into a single score
+that reflects how well the agent understood and responded to each user turn.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The existing confidence score used in the analysis tool is derived from a
+single log line — the intent detection percentage. This gives a useful but
+incomplete picture. The system actually generates several independent signals
+for each user turn, each measuring a different aspect of how well the
+conversation went.
+
+The goal of a unified score is to combine these signals into a single number
+that answers the question:
+
+    "How likely is it that this particular exchange represents a genuine
+     failure point — a moment where the agent misunderstood, misinterpreted,
+     or responded incorrectly to what the user said?"
+
+A low unified score should flag an exchange as one worth a human reviewer
+looking at. A high score means the system was confident at every stage of
+processing that turn.
+
+The score is designed to sit between 0.0 and 1.0, where:
+    1.0 = system was fully confident at every stage
+    0.0 = system had no confidence or clear signals of failure
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE TWO LAYERS OF PROCESSING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When a user speaks, the system processes their utterance in two distinct
+phases. Understanding these phases is key to understanding why the signals
+are weighted the way they are.
+
+LAYER 1 — RECOGNITION
+  "What did the user say, and what did they mean?"
+
+  The system takes the raw audio, converts it to text, and classifies the
+  utterance into a named intent category. This happens before any
+  conversation context is considered. The question being answered is purely:
+  "What is the general meaning of this statement?"
+
+  Signals from this layer:
+    - Intent Confidence
+    - Voice Intent Confidence
+    - Goal Trigger Confidence
+
+LAYER 2 — UNDERSTANDING
+  "Given the context of this conversation, did the user's response
+   satisfy the goal the agent was pursuing?"
+
+  This is a higher-order judgment. It takes the recognised intent AND the
+  full conversation context — what the agent just asked, what goal is active,
+  what information has already been collected — and asks whether the user's
+  response moves the conversation forward correctly.
+
+  Signals from this layer:
+    - NLI Validation Score
+    - Satisfaction Score Delta
+
+The reason Layer 2 signals receive more weight is that they are harder to
+fool. A user could say something that is correctly recognised at Layer 1
+(high intent confidence) but still represents a misunderstanding or an
+ambiguous answer in context. Layer 2 catches those cases.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 1 — NLI VALIDATION SCORE
+Weight: 50%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+NLI stands for Natural Language Inference. It is a separate AI model that
+runs after the intent classifier and asks a more specific question:
+
+    "Given that the agent asked X, and the user responded with Y,
+     does the user's response confirm what the agent needed to know?"
+
+It produces two outputs:
+  1. A label — one of: entailment, neutral, or contradiction
+  2. A confidence score — how certain the model was about that label
+
+Entailment means the user's response confirmed what was needed.
+Contradiction means the user clearly denied or rejected it.
+Neutral means the response was ambiguous — neither a clear yes nor a clear no.
+
+Examples of what each label looks like in practice:
+
+  Entailment (0.9990):
+    Agent: "Would Tuesday June 16th at 4:45pm or 5pm work for you?"
+    User: "No"
+    => NLI determined with 99.9% confidence that the user rejected the slot.
+    (High confidence contradiction — the agent knows to offer alternatives.)
+
+  Entailment (1.0):
+    Agent: "Am I speaking to Roy Lahav?"
+    User: "Hi. This is Ryan"
+    => NLI determined with 100% confidence that the user confirmed their name.
+
+  Neutral (0.728):
+    Agent: [opening]
+    User: "Hello? Is this Shantanu?"
+    => The user's response didn't clearly confirm or deny anything — ambiguous.
+    This neutral + lower score is the kind of case a reviewer should examine.
+
+WHY IT GETS 50% OF THE WEIGHT
+
+NLI is the only signal that evaluates the exchange in its full conversational
+context. Every other signal looks at the user's utterance in isolation; NLI
+looks at the agent's question AND the user's answer together. This means it
+is the closest proxy to what a human reviewer is actually judging when they
+read an exchange and decide if it was handled correctly.
+
+The 50% weight reflects the fact that if NLI is confident, that single signal
+is more informative than all the recognition-layer signals combined. When NLI
+says "I am 99% sure the user confirmed the meeting slot," that is a stronger
+statement about conversation quality than knowing the intent was recognised
+at 0.96.
+
+IMPORTANT CAVEAT — THE LABEL MATTERS
+
+A high NLI score does not automatically mean the exchange went well. The score
+must be read alongside the label:
+
+  - High score + entailment = the user clearly confirmed something. Good.
+  - High score + contradiction = the user clearly refused. This is not a
+    failure in understanding — it's a real rejection. Not a quality issue.
+  - High score + neutral = the system was very confident that it couldn't
+    tell what the user meant. This IS a problem.
+  - Low score + any label = the system was unsure about its own interpretation.
+    This is the most important flag for human review.
+
+In the formula, NLI neutral scores should be treated as a penalty signal
+(they reduce the unified score), while high-confidence entailment or
+contradiction scores should be treated as positive (the system understood
+the exchange clearly, regardless of the user's answer).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 2 — INTENT CONFIDENCE
+Weight: 25%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+Intent confidence measures how certain the text-based classifier was when
+categorising the user's utterance into an intent. An intent is a named
+category defined in the agent's script — for example: "confirm", "reject",
+"hello", "not interested", "schedule request".
+
+The classifier compares the user's utterance against all known intents and
+returns the best match along with a confidence score.
+
+Examples:
+  "detected intent "confirm" as "yes, it is" 0.96%"
+  => The classifier matched "yes, it is" to the "confirm" intent with 96%
+     confidence.
+
+  "detected hard-coded intent "confirm" as "Yes." 1.0%"
+  => "Hard-coded" means this was an exact or near-exact match to a pre-defined
+     phrase in the script, hence 100% confidence.
+
+WHY IT GETS 25% OF THE WEIGHT
+
+Intent confidence is the existing signal and has already proven useful — the
+current tool uses it as its sole confidence measure, and it successfully
+surfaces ambiguous exchanges. It is reliable and always present (every user
+turn generates an intent detection line).
+
+It receives 25% rather than a higher weight because it has a known limitation:
+it measures the utterance in isolation. A user saying "yes" to the wrong
+question will generate a high intent confidence score for "confirm", even
+though the agent may have proceeded incorrectly. Intent confidence tells you
+the utterance was understood; it does not tell you whether it was acted on
+appropriately.
+
+It is given the second highest weight because it is the fallback when NLI is
+not present — which happens on turns where no value collection or confirmation
+is occurring. In those cases, intent confidence carries proportionally more
+of the total score.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 3 — VOICE INTENT CONFIDENCE
+Weight: 15%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+Voice intent confidence is produced by a parallel intent detection pipeline
+optimised specifically for spoken language. Where the text intent classifier
+works on the transcribed text, the voice classifier accounts for patterns
+that are more natural in speech — shorter responses, filler words, prosodic
+patterns, voice-specific phrasing.
+
+It produces the same kind of output (an intent label and a confidence score)
+but through a different model.
+
+Examples:
+  "detected voice_intent "%continue%" as "yes" 1.0%"
+  => The voice pipeline matched "yes" to the continue intent with 100%
+     confidence.
+
+  "detected voice_intent "%sorry_what%" as "sorry what?" 0.93%"
+  => The voice pipeline detected a "sorry, what?" clarification intent with
+     93% confidence.
+
+WHY IT GETS 15% OF THE WEIGHT
+
+On its own, voice intent confidence is largely redundant with text intent
+confidence — they usually agree and usually score similarly. Its primary
+value is in the cases where they disagree.
+
+When the text classifier says 0.90 and the voice classifier says 0.45 for
+the same utterance, that discrepancy is itself a meaningful signal. It
+suggests the utterance was clear when read as text but ambiguous when
+heard as speech — which could indicate a transcription error, background
+noise, or a genuinely confusing utterance.
+
+The 15% base weight reflects its typical redundancy with text intent.
+However, the unified score formula adds a disagreement penalty on top of
+this: when the two signals diverge significantly, additional weight is
+removed from the final score. This means voice intent punches above its
+15% weight specifically in the situations where it matters most.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 4 — GOAL TRIGGER CONFIDENCE
+Weight: 5%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+After the intent is classified, the system decides which goal in the script
+should be activated in response. Goal trigger confidence measures how certain
+the system was about that routing decision — did this intent correctly map
+to the right next step in the conversation?
+
+Examples:
+  "Goal "speaker verification" considered by TRIGGER "hello" 0.96%"
+  => The system matched the "hello" intent to the "speaker verification" goal
+     with 96% confidence.
+
+  "Goal "call screener handling" considered by TRIGGER
+   "Hi, If you record your name..." 1.0%"
+  => A call screener message was matched to the screener handling goal with
+     100% confidence.
+
+WHY IT GETS ONLY 5% OF THE WEIGHT
+
+Goal trigger confidence is almost always identical to or derived from the
+intent confidence score. The routing from intent to goal is deterministic in
+most cases — a "confirm" intent almost always maps to the same goal. As a
+result, this signal rarely adds information beyond what intent confidence
+already provides.
+
+The 5% weight ensures it contributes to the score when it does diverge from
+intent confidence — which can happen in complex multi-goal situations where
+the same intent could route to several different goals — but prevents it from
+double-counting the intent confidence signal in the majority of cases.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 5 — SATISFACTION SCORE DELTA
+Weight: 5%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+The satisfaction score is a running total that accumulates across the entire
+call. It increases when the conversation progresses (user confirms something,
+a goal is completed) and decreases when things go wrong (user pushes back,
+refuses, or repeats themselves).
+
+The raw accumulated value is not useful per-turn — a score of 11.75 on turn 8
+just means the call went well overall up to that point, not that turn 8
+specifically went well.
+
+What IS useful is the DELTA — the change in satisfaction score caused by that
+specific turn. A positive delta means that turn moved things forward. A
+negative delta means that turn represented a setback.
+
+Examples:
+  "Satisfaction=0.25 (+0.25) by user turn"
+    => Delta: +0.25 — small positive progress, early in call.
+
+  "Satisfaction=11.75 (-0.5) by user turn"
+    => Delta: -0.5 — the user's response caused a setback, despite the call
+       being otherwise healthy. Worth a closer look.
+
+  "Satisfaction=4.7 (+0.2) by Agent turn=are-you-there"
+    => Delta: +0.2 — minor progress. The "are-you-there" label indicates the
+       agent was checking if the user was still on the line.
+
+WHY IT GETS ONLY 5% OF THE WEIGHT
+
+The satisfaction delta is a useful corroborating signal but has two
+weaknesses that limit its weight:
+
+First, it is not calibrated to a 0–1 scale. The delta values can vary widely
+depending on the stage of the call and the agent configuration, making it
+harder to compare meaningfully across different conversations or agents.
+Normalisation is required before it can be combined with other signals.
+
+Second, it measures conversation flow rather than language understanding.
+A negative delta might mean the user said something ambiguous, but it could
+equally mean the user simply refused a reasonable offer — a business outcome
+that is not a quality failure. It cannot distinguish between these cases on
+its own. The other signals (especially NLI) are better placed to make that
+distinction.
+
+The 5% weight means it contributes a small tiebreaker signal — useful when
+other signals are borderline, but not enough to override the understanding-
+layer signals.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIGNAL 6 — PROMPT VALIDATION CONFIDENCE
+Weight: 0% (excluded)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT IT MEASURES
+
+Prompt validation confidence measures how well the agent's own question or
+statement matched what was expected for the current goal. It is an evaluation
+of the agent's output, not of the user's input or response.
+
+Examples:
+  "Goal "inbound contact name" prompt validated at 100.0% confidence
+   with sentence: who am i speaking with"
+
+  "Goal "speaker verification" prompt validated at 100.0% confidence
+   with sentence: am i speaking to kyle glover"
+
+WHY IT IS EXCLUDED
+
+The unified score is designed to identify exchanges where the agent may have
+misunderstood or mishandled the user's input. Prompt validation confidence
+measures something orthogonal to this — whether the agent asked the right
+question. A perfectly formed agent question can still be followed by a
+misunderstood user response, and a poorly formed question can still be
+followed by a correctly understood one.
+
+Including this signal would conflate two different quality dimensions: agent
+output quality (what the agent said) versus agent comprehension quality (what
+the agent understood). Since the annotation task is focused on whether the
+agent's response was correct in relation to what the user said, only
+comprehension quality is relevant.
+
+Prompt validation confidence would be the right signal for a different
+analysis — one focused on evaluating and improving the agent's script.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE DISAGREEMENT PENALTY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Beyond the weighted signals, the formula includes one additional adjustment:
+a penalty applied when the text intent confidence and voice intent confidence
+disagree significantly.
+
+    Disagreement penalty = 0.10 × |text_intent_score − voice_intent_score|
+
+Example:
+  Text intent confidence:  0.92
+  Voice intent confidence: 0.45
+  Penalty: 0.10 × |0.92 − 0.45| = 0.10 × 0.47 = 0.047
+
+The maximum possible penalty is 0.10 (when one is 1.0 and the other is 0.0).
+
+The rationale is that a large gap between the two pipelines is a signal in
+its own right — one that cannot be captured by weighting each score
+individually. It suggests that the utterance behaved differently as raw audio
+versus transcribed text, which is a genuine source of processing uncertainty
+that should reduce the unified score even if both individual scores are
+moderate.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HANDLING MISSING SIGNALS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Not all signals are present on every turn. NLI validation in particular only
+appears when the system is actively trying to collect or confirm a value from
+the user. On turns where the user says something off-topic or early in a call
+before any goal is active, there may be no NLI line at all.
+
+The recommended approach when a signal is absent is proportional rescaling:
+remove that signal's weight from the total and redistribute proportionally
+across the signals that are present.
+
+Example — NLI is absent:
+  Available signals: intent (25%), voice intent (15%), goal trigger (5%),
+  satisfaction delta (5%) = 50% total weight available.
+  The formula is rescaled so these four signals together produce a 0–1 score,
+  as if they represented the full picture.
+
+This approach is preferable to substituting a default value (e.g. 0.5 for
+missing NLI), because a default value would artificially compress the score
+toward the middle and make the unified score less meaningful as a flag for
+human review.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WEIGHT SUMMARY TABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Signal                    Layer           Weight   Scale
+  ─────────────────────────────────────────────────────────────────────────
+  NLI Validation Score      Understanding   50%      0.0 – 1.0
+  Intent Confidence         Recognition     25%      0.0 – 1.0
+  Voice Intent Confidence   Recognition     15%      0.0 – 1.0
+  Goal Trigger Confidence   Recognition      5%      0.0 – 1.0
+  Satisfaction Delta        Flow             5%      Normalised to 0.0 – 1.0
+  Prompt Validation         (excluded)       0%      —
+  ─────────────────────────────────────────────────────────────────────────
+  Disagreement Penalty      Cross-signal    -10%     Applied after weighting
+                            (max)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A NOTE ON CALIBRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The weights described in this document are a principled starting point, not
+ground truth. They are based on reasoning about what each signal measures and
+how much independent information it contributes.
+
+The right way to validate and refine these weights is against real human
+annotation data. Once enough annotated exchanges are collected (through the
+annotation tool), it becomes possible to run a logistic regression or similar
+analysis to determine which combination of signals best predicts the human
+judgement of "correct" versus "incorrect" or "partially correct".
+
+At that point the weights could be updated to reflect what actually correlates
+with human assessment rather than what theory suggests should. The framework
+described here provides a strong starting point for that calibration process.
