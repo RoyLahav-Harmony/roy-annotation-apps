@@ -402,6 +402,9 @@ hr { border-color: #E2E8F0 !important; margin: 1rem 0; }
     font-weight: 600;
     margin-left: 8px;
 }
+
+/* Hide Streamlit's clear-cache keyboard shortcut dialog */
+[data-testid="stModal"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -410,12 +413,39 @@ import streamlit.components.v1 as _components
 _components.html("""
 <script>
 (function() {
-    // Block Cmd+C / Ctrl+C from triggering Streamlit's clear-cache shortcut
-    window.parent.addEventListener('keydown', function(e) {
-        if (e.metaKey || e.ctrlKey || e.altKey) {
+    // Block Streamlit's 'c' keyboard shortcut (clear cache dialog).
+    // Strategy 1: intercept the keydown event before Streamlit's handler.
+    function blockClearCache(e) {
+        if (e.key === 'c' || e.key === 'C') {
             e.stopImmediatePropagation();
+            e.stopPropagation();
+            // Do NOT preventDefault — native Cmd+C copy still works via browser.
         }
-    }, true);
+    }
+    try {
+        window.parent.document.addEventListener('keydown', blockClearCache, true);
+    } catch(err) {}
+
+    // Strategy 2: MutationObserver fallback — if the dialog appears anyway, dismiss it.
+    try {
+        var observer = new MutationObserver(function() {
+            var doc = window.parent.document;
+            // Streamlit's modal has a button group; the last button is typically Cancel.
+            var modal = doc.querySelector('[data-testid="stModal"]');
+            if (!modal) return;
+            // Click the "Cancel" / dismiss button (last button in the dialog).
+            var btns = modal.querySelectorAll('button');
+            btns.forEach(function(btn) {
+                if (btn.textContent.trim().toLowerCase() === 'cancel' ||
+                    btn.textContent.trim().toLowerCase() === 'close') {
+                    btn.click();
+                }
+            });
+            // Fallback: send Escape key to close the modal.
+            doc.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+        });
+        observer.observe(window.parent.document.body, {childList: true, subtree: true});
+    } catch(err) {}
 
     // Add borders to section-level stLayoutWrapper in the right pane only.
     // Uses JS so we can check actual parent chains rather than guessing CSS selectors.
