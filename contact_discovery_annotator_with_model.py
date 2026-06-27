@@ -404,7 +404,8 @@ hr { border-color: #E2E8F0 !important; margin: 1rem 0; }
 }
 
 /* Hide Streamlit's clear-cache keyboard shortcut dialog */
-[data-testid="stModal"] { display: none !important; }
+[data-testid="stClearCacheDialog"],
+[data-testid="stDialog"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -431,7 +432,7 @@ _components.html("""
         var observer = new MutationObserver(function() {
             var doc = window.parent.document;
             // Streamlit's modal has a button group; the last button is typically Cancel.
-            var modal = doc.querySelector('[data-testid="stModal"]');
+            var modal = doc.querySelector('[data-testid="stClearCacheDialog"]');
             if (!modal) return;
             // Click the "Cancel" / dismiss button (last button in the dialog).
             var btns = modal.querySelectorAll('button');
