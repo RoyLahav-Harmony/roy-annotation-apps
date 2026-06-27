@@ -33,6 +33,81 @@ def _get_mongo_collection():
     except Exception:
         return None
 
+def _get_rearranged_collection():
+    try:
+        return _get_mongo_client()["roy's_projects"]["contact_discovery_rearranged"]
+    except Exception:
+        return None
+
+def _build_rearranged_doc(doc):
+    def get_indices(val):
+        return val if isinstance(val, list) else []
+
+    labels = doc.get("Labels", {})
+    speaker_map = {}
+    for speaker in labels.values():
+        fname_lookup = {}
+        raw_fname = speaker.get("Fname", [])
+        if isinstance(raw_fname, list):
+            for entry in raw_fname:
+                for i in entry[1]:
+                    fname_lookup[i] = entry[0]
+        lname_lookup = {}
+        raw_lname = speaker.get("Lname", [])
+        if isinstance(raw_lname, list):
+            for entry in raw_lname:
+                for i in entry[1]:
+                    lname_lookup[i] = entry[0]
+        contact_indices   = get_indices(speaker.get("contact_is_speaker", []))
+        intro_inc         = get_indices(speaker.get("intro_includes_name", []))
+        intro_exc         = get_indices(speaker.get("intro_doesnt_include_name", []))
+        name_known        = speaker.get("contact_name_known")
+        if name_known == "N/A": name_known = None
+        intro_inc_trigger = min(intro_inc) if intro_inc else None
+        intro_exc_trigger = min(intro_exc) if intro_exc else None
+        all_indices = set(fname_lookup) | set(lname_lookup) | set(contact_indices) | set(intro_inc) | set(intro_exc)
+        for i in all_indices:
+            intro_inc_val  = True if i == intro_inc_trigger else None
+            intro_exc_val  = True if i == intro_exc_trigger else None
+            name_known_val = name_known if (intro_inc_val or intro_exc_val) else None
+            speaker_map[i] = {
+                "fname":                     fname_lookup.get(i),
+                "lname":                     lname_lookup.get(i),
+                "is_contact":                i in contact_indices,
+                "intro_includes_name":       intro_inc_val,
+                "intro_doesnt_include_name": intro_exc_val,
+                "contact_name_known":        name_known_val,
+            }
+
+    utterances = []
+    for turn_index, turn in enumerate(doc.get("turns", [])):
+        key  = list(turn.keys())[0]
+        text = turn[key]
+        if key == "assistant":
+            utterances.append({"turn_index": turn_index, "speaker": "agent", "text": text})
+        else:
+            reply_index = int(key.split(" ")[1])
+            sp = speaker_map.get(reply_index, {})
+            utterances.append({
+                "turn_index":                turn_index,
+                "speaker":                   "user",
+                "text":                      text,
+                "reply_index":               reply_index,
+                "is_contact":                sp.get("is_contact", False),
+                "fname":                     sp.get("fname"),
+                "lname":                     sp.get("lname"),
+                "intro_includes_name":       sp.get("intro_includes_name"),
+                "intro_doesnt_include_name": sp.get("intro_doesnt_include_name"),
+                "contact_name_known":        sp.get("contact_name_known"),
+            })
+
+    return {
+        "chat_id":    doc["chat_id"],
+        "annotator":  doc["annotator"],
+        "source":     doc.get("source"),
+        "utterances": utterances,
+    }
+
 def _get_source_collection(project_name="contact_discovery"):
     try:
         return _get_mongo_client()["Roy_source_files"][project_name]
@@ -2007,6 +2082,14 @@ with right:
                       {"$set": _doc},
                       upsert=True,
                   )
+                  _rearranged_col = _get_rearranged_collection()
+                  if _rearranged_col is not None:
+                      _rearranged_doc = _build_rearranged_doc(_doc)
+                      _rearranged_col.update_one(
+                          {"chat_id": chat_id, "annotator": annotator_name},
+                          {"$set": _rearranged_doc},
+                          upsert=True,
+                      )
               except Exception as _e:
                   st.warning(f"⚠️ Saved locally but MongoDB sync failed: {_e}")
           else:
