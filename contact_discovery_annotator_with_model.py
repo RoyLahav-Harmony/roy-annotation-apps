@@ -33,6 +33,12 @@ def _get_mongo_collection():
     except Exception:
         return None
 
+def _get_source_collection(project_name="contact_discovery"):
+    try:
+        return _get_mongo_client()["Roy_source_files"][project_name]
+    except Exception:
+        return None
+
 def _list_source_projects():
     try:
         return sorted(_get_mongo_client()["Roy_source_files"].list_collection_names())
@@ -217,16 +223,18 @@ hr { border-color: #E2E8F0 !important; margin: 1rem 0; }
     align-items: flex-start !important;
 }
 
-/* Bordered containers */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    border-color: #93C5FD !important;
-    border-width: 2px !important;
+/* Scrollable st.container(border=True, height=X) — overflow is a direct HTML attribute */
+[data-testid="stVerticalBlock"][overflow="auto"] {
+    border: 2px solid #3B82F6 !important;
     border-radius: 10px !important;
+    box-shadow: 0 0 0 2px #3B82F6 !important;
 }
+/* Plain st.container(border=True) — handled via JS below for precision */
+[data-testid="stVerticalBlockBorderWrapper"],
 [data-testid="stVerticalBlockBorderWrapper"] > div {
-    border-color: #93C5FD !important;
-    border-width: 2px !important;
+    border: 2px solid #3B82F6 !important;
     border-radius: 10px !important;
+    box-shadow: 0 0 0 2px #3B82F6 !important;
 }
 
 
@@ -322,6 +330,66 @@ hr { border-color: #E2E8F0 !important; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── JS: keyboard shortcut block + inner section borders ───────────────────────
+import streamlit.components.v1 as _components
+_components.html("""
+<script>
+(function() {
+    // Block Cmd+C / Ctrl+C from triggering Streamlit's clear-cache shortcut
+    window.parent.addEventListener('keydown', function(e) {
+        if (e.metaKey || e.ctrlKey || e.altKey) {
+            e.stopImmediatePropagation();
+        }
+    }, true);
+
+    // Add borders to section-level stLayoutWrapper in the right pane only.
+    // Uses JS so we can check actual parent chains rather than guessing CSS selectors.
+    function applyBorders() {
+        var doc = window.parent.document;
+        var panes = doc.querySelectorAll('[data-testid="stVerticalBlock"][overflow="auto"]');
+        if (panes.length < 2) return;
+
+        var rightPane = panes[panes.length - 1];
+
+        // Clear any previously injected styles on all stLayoutWrapper in both panes
+        doc.querySelectorAll('[data-testid="stLayoutWrapper"]').forEach(function(el) {
+            el.style.removeProperty('border');
+            el.style.removeProperty('border-radius');
+            el.style.removeProperty('box-shadow');
+        });
+
+        // Add borders only to section-level wrappers in the right pane:
+        // those whose closest stLayoutWrapper ancestor is the right pane boundary.
+        rightPane.querySelectorAll('[data-testid="stLayoutWrapper"]').forEach(function(el) {
+            var p = el.parentElement;
+            var nested = false;
+            while (p && p !== rightPane) {
+                if (p.getAttribute('data-testid') === 'stLayoutWrapper') {
+                    nested = true;
+                    break;
+                }
+                p = p.parentElement;
+            }
+            if (!nested) {
+                el.style.setProperty('border',        '1px solid #93C5FD', 'important');
+                el.style.setProperty('border-radius', '10px',              'important');
+                el.style.setProperty('box-shadow',    'none',              'important');
+            }
+        });
+    }
+
+    // Re-run after every Streamlit re-render (debounced)
+    var _t;
+    new MutationObserver(function() {
+        clearTimeout(_t);
+        _t = setTimeout(applyBorders, 120);
+    }).observe(window.parent.document.body, { childList: true, subtree: true });
+
+    applyBorders();
+})();
+</script>
+""", height=0)
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 def _check_login(username, password):
@@ -353,12 +421,12 @@ if not st.session_state.get("authenticated"):
     st.stop()
 
 annotator_name = st.session_state["annotator_name"]
-with st.sidebar:
-    st.caption(f"Logged in as **{annotator_name}**")
-    if st.button("Log out", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+_cap_col, _logout_col = st.columns([6, 1])
+_cap_col.caption(f"Logged in as **{annotator_name}**")
+if _logout_col.button("Log out", use_container_width=True):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
 
 # ── Data source ────────────────────────────────────────────────────────────────
 
@@ -469,6 +537,25 @@ def _restore_annotations(ann_data, label):
                                  "lname", "lname_start", "lname_end", "lname_turns_na"]:
                         st.session_state.pop(f"{_fld}__{cid}__{sp_i}__{_j}", None)
 
+        # ── Restore edited / inserted turns ───────────────────────────────
+        ann_turns  = item.get("turns", [])
+        orig_turns = orig_by_id[cid]
+        if ann_turns and ann_turns != orig_turns:
+            st.session_state[f"working_turns__{cid}"] = [dict(t) for t in ann_turns]
+            edited, new = set(), set()
+            for i, t in enumerate(ann_turns):
+                fk = list(t.keys())[0]
+                if i >= len(orig_turns):
+                    new.add(i)
+                else:
+                    ok = list(orig_turns[i].keys())[0]
+                    if fk != ok:
+                        new.add(i)
+                    elif t[fk] != orig_turns[i][ok]:
+                        edited.add(i)
+            st.session_state[f"edited_indices__{cid}"] = edited
+            st.session_state[f"new_indices__{cid}"]    = new
+
         loaded_n += 1
 
     st.session_state["_loaded_ann_file"] = label
@@ -550,6 +637,49 @@ chat_id = conv["chat_id"]
 turns   = conv["turns"]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _build_changes(orig_turns, working_turns, edited_indices, new_indices):
+    """Return a list of change records, or None if nothing changed."""
+    if (not edited_indices and not new_indices
+            and len(orig_turns) == len(working_turns)):
+        return None
+
+    def _text(turn):
+        return turn[list(turn.keys())[0]]
+
+    changes = []
+
+    # Non-new working turns correspond positionally to original turns
+    non_new = [(i, working_turns[i]) for i in range(len(working_turns))
+               if i not in new_indices]
+
+    for j, (wi, wt) in enumerate(non_new):
+        if j >= len(orig_turns):
+            break
+        orig_text = _text(orig_turns[j])
+        work_text = _text(wt)
+        if orig_text != work_text:
+            changes.append({
+                "type":    "edited",
+                "was":     orig_text,
+                "is now":  work_text,
+            })
+
+    # Original turns beyond non_new length were deleted
+    for j in range(len(non_new), len(orig_turns)):
+        changes.append({
+            "type": "deleted",
+            "was":  _text(orig_turns[j]),
+        })
+
+    # Newly inserted turns
+    for wi in sorted(new_indices):
+        changes.append({
+            "type": "added",
+            "text": _text(working_turns[wi]),
+        })
+
+    return changes if changes else None
 
 def _renumber_turns(turn_list):
     """Re-sequence all 'reply N' keys in order after any insertion/deletion."""
@@ -834,7 +964,7 @@ with left:
             _pending_del = st.session_state.get(f"deleting_turn__{chat_id}") == turn_idx
             delete_cls  = " turn-pending-delete" if _pending_del else ""
 
-            chk_col, bubble_col, up_col, dn_col, edit_col, ins_col, del_col = st.columns([0.08, 0.55, 0.06, 0.06, 0.07, 0.07, 0.07])
+            chk_col, bubble_col, up_col, dn_col, edit_col, ins_col, del_col = st.columns([0.05, 0.67, 0.05, 0.05, 0.06, 0.06, 0.06])
             with chk_col:
                 if is_reply:
                     _key = f"model_turn__{chat_id}__{turn_idx}"
@@ -1475,7 +1605,10 @@ with right:
     # Keep contacts in sync with live widget state on every render.
     # This ensures _init always has up-to-date defaults to restore from,
     # even if a left-panel button rerun resets widget keys.
-    if f"fname__{chat_id}__0__0" in st.session_state:
+    # Skip when an "add name" button just fired — the snapshot in contacts_key
+    # is already correct, and re-reading widgets would overwrite it with cleared values.
+    _skip_sync = st.session_state.pop(f"_skip_sync__{chat_id}", False)
+    if not _skip_sync and f"fname__{chat_id}__0__0" in st.session_state:
         contacts = _read_contacts_from_widgets(chat_id, n_contacts)
         st.session_state[contacts_key] = contacts
 
@@ -1679,6 +1812,8 @@ with right:
             if not fn_na:
                 if st.button("＋ Add first name", key=f"add_fname__{chat_id}__{i}",
                              use_container_width=True):
+                    st.session_state[contacts_key] = _read_contacts_from_widgets(chat_id, n_contacts)
+                    st.session_state[f"_skip_sync__{chat_id}"] = True
                     new_j = fn_count
                     st.session_state[f"fname__{chat_id}__{i}__{new_j}"]          = ""
                     st.session_state[f"fname_turns_na__{chat_id}__{i}__{new_j}"] = False
@@ -1730,6 +1865,8 @@ with right:
             if not ln_na:
                 if st.button("＋ Add last name", key=f"add_lname__{chat_id}__{i}",
                              use_container_width=True):
+                    st.session_state[contacts_key] = _read_contacts_from_widgets(chat_id, n_contacts)
+                    st.session_state[f"_skip_sync__{chat_id}"] = True
                     new_j = ln_count
                     st.session_state[f"lname__{chat_id}__{i}__{new_j}"]          = ""
                     st.session_state[f"lname_turns_na__{chat_id}__{i}__{new_j}"] = False
@@ -1851,23 +1988,43 @@ with right:
           _mongo_col = _get_mongo_collection()
           if _mongo_col is not None:
               try:
-                  _working = st.session_state.get(f"working_turns__{chat_id}", conv["turns"])
+                  _working   = st.session_state.get(f"working_turns__{chat_id}", conv["turns"])
+                  _edited    = st.session_state.get(f"edited_indices__{chat_id}", set())
+                  _new       = st.session_state.get(f"new_indices__{chat_id}", set())
+                  _changes   = _build_changes(conv["turns"], _working, _edited, _new)
+                  _doc = {
+                      "chat_id":      chat_id,
+                      "annotator":    annotator_name,
+                      "Labels":       saved_labels,
+                      "turns":        _working,
+                      "source":       conv.get("source"),
+                      "last_updated": datetime.now(timezone.utc).isoformat(),
+                  }
+                  if _changes:
+                      _doc["changes"] = _changes
                   _mongo_col.update_one(
                       {"chat_id": chat_id, "annotator": annotator_name},
-                      {"$set": {
-                          "chat_id":      chat_id,
-                          "annotator":    annotator_name,
-                          "Labels":       saved_labels,
-                          "turns":        _working,
-                          "source":       conv.get("source"),
-                          "last_updated": datetime.now(timezone.utc).isoformat(),
-                      }},
+                      {"$set": _doc},
                       upsert=True,
                   )
               except Exception as _e:
                   st.warning(f"⚠️ Saved locally but MongoDB sync failed: {_e}")
           else:
               st.warning("⚠️ MongoDB unavailable — annotation saved locally only.")
+
+          # ── Sync turns back to source file if Roy edited them ─────────────
+          if annotator_name == "Roy" and _mongo_col is not None:
+              try:
+                  _source_col = _get_source_collection()
+                  if _source_col is not None:
+                      _src_doc = _source_col.find_one({"chat_id": chat_id}, {"turns": 1})
+                      if _src_doc and _src_doc.get("turns") != _working:
+                          _source_col.update_one(
+                              {"chat_id": chat_id},
+                              {"$set": {"turns": _working}},
+                          )
+              except Exception as _se:
+                  st.warning(f"⚠️ Annotation saved but source file sync failed: {_se}")
 
           if idx < n_total - 1:
               st.session_state["conv_index"] = idx + 1
