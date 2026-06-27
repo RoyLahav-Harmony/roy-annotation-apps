@@ -1,0 +1,149 @@
+"""
+fresh_conversions_dashboard.py
+
+Daily "fresh conversions" dashboard — contacts that were called for the first
+time AND merged on the same calendar day, for a specific agent.
+
+Usage:
+    streamlit run fresh_conversions_dashboard.py
+"""
+
+import ast
+from datetime import datetime, date, timedelta
+
+import pandas as pd
+import streamlit as st
+from pymongo import MongoClient
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
+MONGODB_URL = st.secrets["fresh_conversions"]["uri"]
+AGENT_ID = "d6bb22ee-d3d0-4e0a-8e5f-67d58bdc759d"
+
+st.set_page_config(page_title="Fresh Conversions", layout="wide")
+st.title("Fresh Conversions Dashboard")
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def parse_dt(s):
+    s = str(s)[:26]
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+def parse_metadata(rm):
+    if isinstance(rm, dict):
+        return rm
+    try:
+        return ast.literal_eval(str(rm))
+    except Exception:
+        return {}
+
+# ── Data fetch ─────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner="Fetching data from MongoDB…")
+def fetch_data(start_iso: str, end_iso: str) -> pd.DataFrame:
+    start_date = datetime.fromisoformat(start_iso)
+    end_date   = datetime.fromisoformat(end_iso)
+
+    client     = MongoClient(MONGODB_URL)
+    collection = client["call_queue"]["phone_calls"]
+
+    docs = collection.find(
+        {"agent_id": AGENT_ID, "result": "converted"},
+        {"contact_id": 1, "call_attempts_log": 1, "_id": 0},
+    )
+
+    rows = []
+    for doc in docs:
+        attempts = doc.get("call_attempts_log", [])
+        converted = next((a for a in attempts if a.get("result") == "converted"), None)
+        if not converted:
+            continue
+
+        conv_time = parse_dt(converted.get("start_time", ""))
+        if not conv_time or not (start_date <= conv_time <= end_date):
+            continue
+
+        merge_time = converted.get("merge_time")
+        metadata   = parse_metadata(converted.get("result_metadata", {}))
+        if not merge_time:
+            merge_time = metadata.get("%merge_time%", "")
+        if not merge_time:
+            continue
+
+        all_times = [parse_dt(a.get("start_time", "")) for a in attempts]
+        all_times = [t for t in all_times if t]
+        if not all_times:
+            continue
+        first_attempt = min(all_times)
+
+        if first_attempt.date() != conv_time.date():
+            continue
+
+        rows.append({
+            "contact_full_name":    metadata.get("contact_full_name", ""),
+            "contact_id":           doc.get("contact_id", ""),
+            "first_call_attempt":   first_attempt,
+            "connecting_call_time": conv_time,
+            "merge_time":           merge_time,
+            "date":                 conv_time.date(),
+        })
+
+    client.close()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("connecting_call_time", ascending=False).reset_index(drop=True)
+    return df
+
+# ── Sidebar controls ───────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.header("Filters")
+    date_from = st.date_input("From", value=date(2026, 1, 1), max_value=date.today())
+    date_to   = st.date_input("To",   value=date.today(),     max_value=date.today())
+    pull      = st.button("Pull Data", type="primary", use_container_width=True)
+
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame()
+
+if pull:
+    start_iso = datetime(date_from.year, date_from.month, date_from.day).isoformat()
+    end_iso   = datetime(date_to.year,   date_to.month,   date_to.day, 23, 59, 59).isoformat()
+    st.session_state.df = fetch_data(start_iso, end_iso)
+
+df = st.session_state.df
+
+if df.empty:
+    st.info("Select a date range and click **Pull Data** to load results.")
+    st.stop()
+
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+
+tab1, tab2 = st.tabs(["Individual Contacts", "Daily Summary"])
+
+with tab1:
+    st.subheader(f"Fresh conversions — {len(df)} contacts")
+    display = df.drop(columns=["date"]).copy()
+    display["first_call_attempt"]   = display["first_call_attempt"].astype(str)
+    display["connecting_call_time"] = display["connecting_call_time"].astype(str)
+    st.dataframe(display, use_container_width=True, height=600)
+
+with tab2:
+    daily = (
+        df.groupby("date")
+          .size()
+          .reset_index(name="fresh_conversions")
+          .sort_values("date", ascending=False)
+    )
+    daily["date"] = daily["date"].astype(str)
+
+    st.subheader("Fresh conversions per day")
+    st.dataframe(daily, use_container_width=True, hide_index=True)
+
+    total = daily["fresh_conversions"].sum()
+    st.metric("Total across selected range", total)
