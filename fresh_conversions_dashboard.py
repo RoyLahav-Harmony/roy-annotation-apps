@@ -44,6 +44,36 @@ def parse_metadata(rm):
 
 # ── Data fetch ─────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=300, show_spinner="Fetching fresh contact totals from MongoDB…")
+def fetch_fresh_totals(start_iso: str, end_iso: str) -> dict:
+    """Return {date: count} of all contacts whose first-ever call happened on each day."""
+    start_date = datetime.fromisoformat(start_iso)
+    end_date   = datetime.fromisoformat(end_iso)
+
+    client     = MongoClient(MONGODB_URL)
+    collection = client["call_queue"]["phone_calls"]
+
+    docs = collection.find(
+        {"agent_id": AGENT_ID},
+        {"call_attempts_log": 1, "_id": 0},
+    )
+
+    totals: dict = {}
+    for doc in docs:
+        attempts  = doc.get("call_attempts_log", [])
+        all_times = [parse_dt(a.get("start_time", "")) for a in attempts]
+        all_times = [t for t in all_times if t]
+        if not all_times:
+            continue
+        first = min(all_times)
+        if start_date <= first <= end_date:
+            d = first.date()
+            totals[d] = totals.get(d, 0) + 1
+
+    client.close()
+    return totals
+
+
 @st.cache_data(ttl=300, show_spinner="Fetching data from MongoDB…")
 def fetch_data(start_iso: str, end_iso: str) -> pd.DataFrame:
     start_date = datetime.fromisoformat(start_iso)
@@ -114,7 +144,8 @@ if "df" not in st.session_state:
 if pull:
     start_iso = datetime(date_from.year, date_from.month, date_from.day).isoformat()
     end_iso   = datetime(date_to.year,   date_to.month,   date_to.day, 23, 59, 59).isoformat()
-    st.session_state.df = fetch_data(start_iso, end_iso)
+    st.session_state.df            = fetch_data(start_iso, end_iso)
+    st.session_state.fresh_totals  = fetch_fresh_totals(start_iso, end_iso)
 
 df = st.session_state.df
 
@@ -134,16 +165,23 @@ with tab1:
     st.dataframe(display, use_container_width=True, height=600)
 
 with tab2:
+    fresh_totals = st.session_state.get("fresh_totals", {})
+
     daily = (
         df.groupby("date")
           .size()
           .reset_index(name="fresh_conversions")
           .sort_values("date", ascending=False)
     )
+    daily["total_fresh_contacts"] = daily["date"].map(
+        lambda d: fresh_totals.get(d, 0)
+    )
+    daily = daily[["date", "total_fresh_contacts", "fresh_conversions"]]
     daily["date"] = daily["date"].astype(str)
 
     st.subheader("Fresh conversions per day")
     st.dataframe(daily, use_container_width=True, hide_index=True)
 
-    total = daily["fresh_conversions"].sum()
-    st.metric("Total across selected range", total)
+    col1, col2 = st.columns(2)
+    col1.metric("Total fresh contacts", int(daily["total_fresh_contacts"].sum()))
+    col2.metric("Total fresh conversions", int(daily["fresh_conversions"].sum()))
