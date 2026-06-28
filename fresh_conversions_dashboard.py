@@ -47,8 +47,8 @@ def parse_metadata(rm):
 @st.cache_data(ttl=300, show_spinner="Fetching contact overview from MongoDB…")
 def fetch_tab3_data(start_iso: str, end_iso: str) -> pd.DataFrame:
     """
-    One row per contact whose first-ever call happened within the date range.
-    Also records whether they had any merge event within the range.
+    One row per contact whose queue_time (upload date) falls within the date range.
+    Also records whether they had any merge event.
     """
     start_date = datetime.fromisoformat(start_iso)
     end_date   = datetime.fromisoformat(end_iso)
@@ -57,37 +57,23 @@ def fetch_tab3_data(start_iso: str, end_iso: str) -> pd.DataFrame:
     collection = client["call_queue"]["phone_calls"]
 
     docs = collection.find(
-        {"agent_id": AGENT_ID},
-        {"contact_id": 1, "call_attempts_log": 1, "_id": 0},
+        {"agent_id": AGENT_ID, "queue_time": {"$gte": start_date, "$lte": end_date}},
+        {"contact_id": 1, "queue_time": 1, "call_attempts_log": 1, "_id": 0},
     )
 
     rows = []
     for doc in docs:
+        queue_time = parse_dt(doc.get("queue_time", ""))
+        if not queue_time:
+            continue
+
         attempts = doc.get("call_attempts_log", [])
-
-        all_times = [parse_dt(a.get("start_time", "")) for a in attempts]
-        all_times = [t for t in all_times if t]
-        if not all_times:
-            continue
-        first_call = min(all_times)
-
-        # Only include contacts whose first-ever call is in the range
-        if not (start_date <= first_call <= end_date):
-            continue
-
-        # Find the earliest merge event in the range (if any)
-        merge_times = [
-            parse_dt(a.get("merge_time", ""))
-            for a in attempts
-            if a.get("merge_time")
-        ]
-        merge_times = [t for t in merge_times if t and start_date <= t <= end_date]
-        first_merge = min(merge_times) if merge_times else None
+        had_merge = any(a.get("merge_time") for a in attempts)
 
         rows.append({
-            "contact_id":       doc.get("contact_id", ""),
-            "first_call_date":  first_call.date(),
-            "first_merge_date": first_merge.date() if first_merge else None,
+            "contact_id":      doc.get("contact_id", ""),
+            "created_date":    queue_time.date(),
+            "had_merge":       had_merge,
         })
 
     client.close()
@@ -244,7 +230,7 @@ with tab3:
         st.info("No data found for the selected range.")
     else:
         total_created    = len(t3)
-        total_with_merge = t3["first_merge_date"].notna().sum()
+        total_with_merge = t3["had_merge"].sum()
 
         col1, col2 = st.columns(2)
         col1.metric("Unique contacts created", total_created)
@@ -252,13 +238,13 @@ with tab3:
 
         st.markdown("---")
 
-        # Monthly breakdown grouped by month of first call
-        t3["month"] = pd.to_datetime(t3["first_call_date"]).dt.to_period("M")
+        # Monthly breakdown grouped by upload month
+        t3["month"] = pd.to_datetime(t3["created_date"]).dt.to_period("M")
         monthly = (
             t3.groupby("month")
               .agg(
-                  contacts_created  = ("contact_id", "count"),
-                  contacts_merged   = ("first_merge_date", lambda x: x.notna().sum()),
+                  contacts_created = ("contact_id", "count"),
+                  contacts_merged  = ("had_merge", "sum"),
               )
               .reset_index()
               .sort_values("month", ascending=False)
