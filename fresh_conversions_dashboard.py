@@ -253,16 +253,14 @@ with tab3:
 
         # Build daily summary: one row per day
         daily_merges = (
-            first_merges_df.groupby("date")["contact_full_name"]
-            .apply(lambda names: ", ".join(n for n in names if n))
-            .reset_index()
-            .rename(columns={"contact_full_name": "merged_contacts"})
+            first_merges_df.groupby("date")
+            .size()
+            .reset_index(name="first_time_merges")
         )
-        daily_merges["fresh_calls"]    = daily_merges["date"].map(lambda d: fresh_totals.get(d, 0))
-        daily_merges["merged_count"]   = first_merges_df.groupby("date").size().values
+        daily_merges["fresh_calls"] = daily_merges["date"].map(lambda d: fresh_totals.get(d, 0))
         daily_merges = daily_merges.sort_values("date", ascending=False).reset_index(drop=True)
         daily_merges["date"] = daily_merges["date"].astype(str)
-        daily_merges = daily_merges[["date", "fresh_calls", "merged_contacts"]]
+        daily_merges = daily_merges[["date", "fresh_calls", "first_time_merges"]]
 
         st.subheader("First-time merges per day")
         st.dataframe(daily_merges, use_container_width=True, hide_index=True)
