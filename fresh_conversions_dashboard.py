@@ -44,6 +44,62 @@ def parse_metadata(rm):
 
 # ── Data fetch ─────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=300, show_spinner="Fetching first-time merges from MongoDB…")
+def fetch_first_merges(start_iso: str, end_iso: str) -> pd.DataFrame:
+    """
+    Return one row per contact for their first-ever merge, within the date range.
+    No filter on fresh/same-day — any contact whose earliest merge falls in range.
+    """
+    start_date = datetime.fromisoformat(start_iso)
+    end_date   = datetime.fromisoformat(end_iso)
+
+    client     = MongoClient(MONGODB_URL)
+    collection = client["call_queue"]["phone_calls"]
+
+    docs = collection.find(
+        {"agent_id": AGENT_ID},
+        {"contact_id": 1, "call_attempts_log": 1, "_id": 0},
+    )
+
+    rows = []
+    for doc in docs:
+        attempts = doc.get("call_attempts_log", [])
+
+        # Collect all merge times across all attempts
+        merges = []
+        for a in attempts:
+            mt = a.get("merge_time")
+            if mt:
+                dt = parse_dt(mt)
+                if dt:
+                    merges.append((dt, a))
+
+        if not merges:
+            continue
+
+        # First-ever merge for this contact
+        first_merge_time, first_merge_attempt = min(merges, key=lambda x: x[0])
+
+        if not (start_date <= first_merge_time <= end_date):
+            continue
+
+        metadata = parse_metadata(first_merge_attempt.get("result_metadata", {}))
+        contact_full_name = metadata.get("contact_full_name", "")
+
+        rows.append({
+            "date":               first_merge_time.date(),
+            "contact_full_name":  contact_full_name,
+            "contact_id":         doc.get("contact_id", ""),
+            "first_merge_time":   first_merge_time,
+        })
+
+    client.close()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("first_merge_time", ascending=False).reset_index(drop=True)
+    return df
+
 @st.cache_data(ttl=300, show_spinner="Fetching fresh contact totals from MongoDB…")
 def fetch_fresh_totals(start_iso: str, end_iso: str) -> dict:
     """Return {date: count} of all contacts whose first-ever call happened on each day."""
@@ -146,6 +202,7 @@ if pull:
     end_iso   = datetime(date_to.year,   date_to.month,   date_to.day, 23, 59, 59).isoformat()
     st.session_state.df            = fetch_data(start_iso, end_iso)
     st.session_state.fresh_totals  = fetch_fresh_totals(start_iso, end_iso)
+    st.session_state.first_merges  = fetch_first_merges(start_iso, end_iso)
 
 df = st.session_state.df
 
@@ -155,7 +212,7 @@ if df.empty:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab1, tab2 = st.tabs(["Individual Contacts", "Daily Summary"])
+tab1, tab2, tab3 = st.tabs(["Individual Contacts", "Daily Summary", "First-Time Merges"])
 
 with tab1:
     st.subheader(f"Fresh conversions — {len(df)} contacts")
@@ -185,3 +242,29 @@ with tab2:
     col1, col2 = st.columns(2)
     col1.metric("Total fresh contacts", int(daily["total_fresh_contacts"].sum()))
     col2.metric("Total fresh conversions", int(daily["fresh_conversions"].sum()))
+
+with tab3:
+    first_merges_df = st.session_state.get("first_merges", pd.DataFrame())
+
+    if first_merges_df.empty:
+        st.info("No first-time merges found for the selected range.")
+    else:
+        fresh_totals = st.session_state.get("fresh_totals", {})
+
+        # Build daily summary: one row per day
+        daily_merges = (
+            first_merges_df.groupby("date")["contact_full_name"]
+            .apply(lambda names: ", ".join(n for n in names if n))
+            .reset_index()
+            .rename(columns={"contact_full_name": "merged_contacts"})
+        )
+        daily_merges["fresh_calls"]    = daily_merges["date"].map(lambda d: fresh_totals.get(d, 0))
+        daily_merges["merged_count"]   = first_merges_df.groupby("date").size().values
+        daily_merges = daily_merges.sort_values("date", ascending=False).reset_index(drop=True)
+        daily_merges["date"] = daily_merges["date"].astype(str)
+        daily_merges = daily_merges[["date", "fresh_calls", "merged_contacts"]]
+
+        st.subheader("First-time merges per day")
+        st.dataframe(daily_merges, use_container_width=True, hide_index=True)
+
+        st.metric("Total first-time merges", len(first_merges_df))
