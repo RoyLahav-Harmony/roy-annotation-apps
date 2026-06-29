@@ -1181,6 +1181,7 @@ with tab_model:
             if correct:
                 n_correct_names += 1
             m2_rows.append({
+                "chat_id":     cid,
                 "Field":       field,
                 "Entry #":     entry_num,
                 "Is change":   entry_num > 0,
@@ -1193,6 +1194,7 @@ with tab_model:
 
         # ── Metric 3: name count vs accuracy ──────────────────────────────────
         m3_rows.append({
+            "chat_id":   cid,
             "n_names":   n_names,
             "n_correct": n_correct_names,
             "accuracy":  n_correct_names / n_names if n_names > 0 else None,
@@ -1318,30 +1320,70 @@ with tab_model:
         m3_agg["avg_acc_pct"] = (m3_agg["avg_acc"] * 100).round(1)
         sort_order = [s for s in ["1", "2", "3", "4+"] if s in m3_agg["group"].values]
 
-        st.altair_chart(
+        m3_sel = alt.selection_point(fields=["group"], name="m3_sel")
+        m3_chart = (
             alt.Chart(m3_agg)
-            .mark_bar(color="#8B5CF6")
+            .mark_bar()
             .encode(
                 x=alt.X("group:N", sort=sort_order, title="Number of name entries",
                          axis=alt.Axis(**_ax)),
                 y=alt.Y("avg_acc_pct:Q", scale=alt.Scale(domain=[0, 100]),
                          title="Avg name accuracy (%)", axis=alt.Axis(**_ax)),
+                color=alt.condition(m3_sel, alt.value("#8B5CF6"), alt.value("#C4B5FD")),
                 tooltip=[
                     alt.Tooltip("group:N",       title="Name entries"),
                     alt.Tooltip("avg_acc_pct:Q", title="Avg accuracy %", format=".1f"),
                     alt.Tooltip("n_convs:Q",     title="Conversations"),
                 ],
             )
+            .add_params(m3_sel)
             .properties(height=280, background="#EFF6FF")
-            .configure_view(strokeWidth=0),
-            use_container_width=True,
+            .configure_view(strokeWidth=0)
         )
+
+        m3_event = st.altair_chart(m3_chart, use_container_width=True, on_select="rerun")
+        st.caption("Click a bar to see per-conversation name breakdown for that group.")
+
         st.dataframe(
             m3_agg.rename(columns={"group": "Name entries", "avg_acc_pct": "Avg accuracy (%)", "n_convs": "Conversations"})[
                 ["Name entries", "Conversations", "Avg accuracy (%)"]
             ],
             hide_index=True, use_container_width=False,
         )
+
+        # ── Detail view on bar click ───────────────────────────────────────────
+        selected_group = None
+        if m3_event and m3_event.get("selection"):
+            sel_vals = [v for v in m3_event["selection"].values() if v]
+            if sel_vals and sel_vals[0]:
+                selected_group = sel_vals[0][0].get("group")
+
+        if selected_group and m2_rows:
+            m2_full = pd.DataFrame(m2_rows)
+            m2_full["group"] = m2_full["chat_id"].map(
+                lambda c: m3_df.set_index("chat_id")["n_names"].get(c, 0)
+            ).apply(lambda n: str(n) if n < 4 else "4+")
+
+            detail = m2_full[m2_full["group"] == selected_group].copy()
+            mistakes = detail[detail["Correct"] == False]
+
+            st.markdown(f"**Detail — {selected_group} name(s) per conversation**")
+            if mistakes.empty:
+                st.success("No mistakes in this group — model got all names right.")
+            else:
+                # One row per name entry: show chat_id, field, GT, model prediction, correct
+                disp = mistakes[["chat_id", "Field", "Is change", "GT name", "Model name", "Detected"]].copy()
+                disp["Is change"] = disp["Is change"].map({True: "Name change", False: "First"})
+                disp["chat_id"]   = disp["chat_id"].str[:20] + "…"
+
+                # Also show the correct ones in the same group for context
+                all_detail = detail[["chat_id", "Field", "Is change", "GT name", "Model name", "Correct"]].copy()
+                all_detail["Is change"] = all_detail["Is change"].map({True: "Name change", False: "First"})
+                all_detail["chat_id"]   = all_detail["chat_id"].str[:20] + "…"
+                all_detail["✓"] = all_detail["Correct"].map({True: "✅", False: "❌"})
+                all_detail = all_detail.drop(columns=["Correct"])
+
+                st.dataframe(all_detail, use_container_width=True, hide_index=True)
     else:
         st.info("Not enough data for name count analysis.")
 
