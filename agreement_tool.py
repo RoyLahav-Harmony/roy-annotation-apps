@@ -281,6 +281,14 @@ def _nm(a, b):
     return bool(a and b and str(a).strip().lower() == str(b).strip().lower())
 
 
+def _ordinal(n):
+    """Convert 0-indexed entry number to '1st name', '2nd name', etc."""
+    i = n + 1
+    s = {1: "st", 2: "nd", 3: "rd"}.get(i if i not in (11, 12, 13) else 0, "th")
+    s = {1: "st", 2: "nd", 3: "rd"}.get(i % 10 if i % 100 not in (11, 12, 13) else 0, "th")
+    return f"{i}{s} name"
+
+
 def _norm_name_str(raw):
     if not raw or raw == "N/A":
         return None
@@ -1295,8 +1303,9 @@ with tab_model:
             st.write(f"**{field_name.capitalize()}** — {nc}/{nt} correct ({nc/nt*100:.1f}%),  {nd}/{nt} detected ({nd/nt*100:.1f}%)")
 
         with st.expander("View all name detection events"):
-            disp = m2_df[["Field", "Is change", "GT name", "First reply", "Model name", "Detected", "Correct"]].copy()
-            disp["Is change"] = disp["Is change"].map({True: "Name change", False: "First"})
+            disp = m2_df[["Field", "Entry #", "GT name", "First reply", "Model name", "Detected", "Correct"]].copy()
+            disp["Entry #"] = disp["Entry #"].apply(_ordinal).rename("Name #")
+            disp = disp.rename(columns={"Entry #": "Name #"})
             st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
         st.info("No name entries found in 100%-agreed conversations.")
@@ -1377,8 +1386,9 @@ with tab_model:
                 disp["chat_id"]   = disp["chat_id"].str[:20] + "…"
 
                 # Also show the correct ones in the same group for context
-                all_detail = detail[["chat_id", "Field", "Is change", "GT name", "Model name", "Correct"]].copy()
-                all_detail["Is change"] = all_detail["Is change"].map({True: "Name change", False: "First"})
+                all_detail = detail[["chat_id", "Field", "Entry #", "GT name", "Model name", "Correct"]].copy()
+                all_detail["Entry #"]   = all_detail["Entry #"].apply(_ordinal)
+                all_detail = all_detail.rename(columns={"Entry #": "Name #"})
                 all_detail["chat_id"]   = all_detail["chat_id"].str[:20] + "…"
                 all_detail["✓"] = all_detail["Correct"].map({True: "✅", False: "❌"})
                 all_detail = all_detail.drop(columns=["Correct"])
