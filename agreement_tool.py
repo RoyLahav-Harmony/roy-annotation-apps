@@ -1355,37 +1355,55 @@ with tab_model:
         "Gap = number of replies between last correct and first wrong."
     )
 
-    for m4_label, m4_gaps, m4_color in [
-        ("Contact identification (is_contact)", m4_contact_gaps, "#3B82F6"),
-        ("First name (fname)",                  m4_fname_gaps,   "#10B981"),
-        ("Last name (lname)",                   m4_lname_gaps,   "#F59E0B"),
-    ]:
-        st.markdown(f"**{m4_label}**")
-        if not m4_gaps:
-            st.caption("No forgetting events detected.")
-            st.markdown("---")
-            continue
+    m4_fields = [
+        ("is_contact", m4_contact_gaps),
+        ("fname",      m4_fname_gaps),
+        ("lname",      m4_lname_gaps),
+    ]
+    m4_color_scale = alt.Scale(
+        domain=["is_contact", "fname", "lname"],
+        range=["#3B82F6", "#10B981", "#F59E0B"],
+    )
 
-        avg_gap = sum(m4_gaps) / len(m4_gaps)
-        med_gap = sorted(m4_gaps)[len(m4_gaps) // 2]
+    # Summary table
+    m4_summary_rows = []
+    for m4_field, m4_gaps in m4_fields:
+        if m4_gaps:
+            avg_gap = round(sum(m4_gaps) / len(m4_gaps), 1)
+            med_gap = sorted(m4_gaps)[len(m4_gaps) // 2]
+        else:
+            avg_gap = med_gap = "—"
+        m4_summary_rows.append({
+            "Field":            m4_field,
+            "Events":           len(m4_gaps),
+            "Avg gap (replies)": avg_gap,
+            "Median gap":       med_gap,
+        })
+    st.dataframe(pd.DataFrame(m4_summary_rows), hide_index=True, use_container_width=False)
 
-        gc1, gc2, gc3 = st.columns(3)
-        gc1.metric("Forgetting events",      len(m4_gaps))
-        gc2.metric("Avg gap (replies)",      f"{avg_gap:.1f}")
-        gc3.metric("Median gap (replies)",   med_gap)
+    # Combined chart — all 3 fields in one grouped histogram
+    m4_all_rows = []
+    for m4_field, m4_gaps in m4_fields:
+        for g in m4_gaps:
+            m4_all_rows.append({"Field": m4_field, "Gap": g})
 
-        gap_df = pd.DataFrame({"Gap": m4_gaps})
+    if m4_all_rows:
+        m4_df = pd.DataFrame(m4_all_rows)
         st.altair_chart(
-            alt.Chart(gap_df)
-            .mark_bar(color=m4_color)
+            alt.Chart(m4_df)
+            .mark_bar(opacity=0.85)
             .encode(
                 x=alt.X("Gap:Q", bin=alt.Bin(step=1), title="Replies until forgotten",
                          axis=alt.Axis(**_ax)),
-                y=alt.Y("count():Q", title="Events", axis=alt.Axis(**_ax)),
-                tooltip=[alt.Tooltip("Gap:Q", bin=True, title="Gap"), "count():Q"],
+                y=alt.Y("count():Q", title="Events", axis=alt.Axis(**_ax),
+                         stack=None),
+                color=alt.Color("Field:N", scale=m4_color_scale,
+                                legend=alt.Legend(labelColor="#1E3A5F", titleColor="#1E3A5F")),
+                tooltip=["Field:N", alt.Tooltip("Gap:Q", bin=True, title="Gap"), "count():Q"],
             )
-            .properties(height=200, background="#EFF6FF")
+            .properties(height=260, background="#EFF6FF")
             .configure_view(strokeWidth=0),
             use_container_width=True,
         )
-        st.markdown("---")
+    else:
+        st.info("No forgetting events detected across any field.")
