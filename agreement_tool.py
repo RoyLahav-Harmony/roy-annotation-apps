@@ -281,6 +281,27 @@ def _nm(a, b):
     return bool(a and b and str(a).strip().lower() == str(b).strip().lower())
 
 
+def _style_groups(df, cid_col="chat_id"):
+    """Return a pandas Styler with alternating group colors per consecutive chat_id."""
+    colors = ["#EFF6FF", "#DBEAFE"]   # blue-50 / blue-100
+    group_ids = []
+    current, prev = 0, None
+    for cid in df[cid_col]:
+        if cid != prev and prev is not None:
+            current = 1 - current
+        prev = cid
+        group_ids.append(current)
+
+    def _apply(df):
+        return pd.DataFrame(
+            [[f"background-color: {colors[group_ids[i]]}; color: #000000"] * len(df.columns)
+             for i in range(len(df))],
+            index=df.index,
+            columns=df.columns,
+        )
+    return df.style.apply(_apply, axis=None)
+
+
 def _ordinal(n):
     """Convert 0-indexed entry number to '1st name', '2nd name', etc."""
     i = n + 1
@@ -1386,14 +1407,18 @@ with tab_model:
                 disp["chat_id"]   = disp["chat_id"].str[:20] + "…"
 
                 # Also show the correct ones in the same group for context
-                all_detail = detail[["chat_id", "Field", "Entry #", "GT name", "Model name", "Correct"]].copy()
+                all_detail = detail[["chat_id", "Field", "Entry #", "First reply", "GT name", "Model name", "Correct"]].copy()
                 all_detail["Entry #"]   = all_detail["Entry #"].apply(_ordinal)
                 all_detail = all_detail.rename(columns={"Entry #": "Name #"})
                 all_detail["chat_id"]   = all_detail["chat_id"].str[:20] + "…"
                 all_detail["✓"] = all_detail["Correct"].map({True: "✅", False: "❌"})
                 all_detail = all_detail.drop(columns=["Correct"])
 
-                st.dataframe(all_detail, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    _style_groups(all_detail, cid_col="chat_id"),
+                    use_container_width=True,
+                    hide_index=True,
+                )
     else:
         st.info("Not enough data for name count analysis.")
 
