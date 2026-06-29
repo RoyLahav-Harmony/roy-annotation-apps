@@ -1389,17 +1389,18 @@ with tab_model:
 
     if m4_all_rows:
         m4_df = pd.DataFrame(m4_all_rows)
+        m4_agg = m4_df.groupby(["Gap", "Field"]).size().reset_index(name="Count")
         st.altair_chart(
-            alt.Chart(m4_df)
-            .mark_bar(opacity=0.85)
+            alt.Chart(m4_agg)
+            .mark_bar()
             .encode(
-                x=alt.X("Gap:Q", bin=alt.Bin(step=1), title="Replies until forgotten",
-                         axis=alt.Axis(**_ax)),
-                y=alt.Y("count():Q", title="Events", axis=alt.Axis(**_ax),
-                         stack=None),
+                x=alt.X("Gap:O", title="Replies until forgotten", axis=alt.Axis(**_ax)),
+                xOffset=alt.XOffset("Field:N", sort=["is_contact", "fname", "lname"]),
+                y=alt.Y("Count:Q", title="Events", axis=alt.Axis(**_ax)),
                 color=alt.Color("Field:N", scale=m4_color_scale,
+                                sort=["is_contact", "fname", "lname"],
                                 legend=alt.Legend(labelColor="#1E3A5F", titleColor="#1E3A5F")),
-                tooltip=["Field:N", alt.Tooltip("Gap:Q", bin=True, title="Gap"), "count():Q"],
+                tooltip=["Field:N", alt.Tooltip("Gap:O", title="Gap"), "Count:Q"],
             )
             .properties(height=260, background="#EFF6FF")
             .configure_view(strokeWidth=0),
