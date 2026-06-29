@@ -214,6 +214,73 @@ def _extract_fields(speaker_dict):
         "Name known":          speaker_dict.get("contact_name_known"),
     }
 
+# ── Model analysis helpers ─────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner="Loading model predictions…")
+def _load_model_preds(chat_ids_tuple):
+    try:
+        docs = list(_get_mongo_client()["roy's_projects"]["contact_discovery_rearranged"].find(
+            {"chat_id": {"$in": list(chat_ids_tuple)}, "annotator": "model", "_complete": True},
+            {"_id": 0},
+        ))
+        return {
+            d["chat_id"]: {
+                u["reply_index"]: u
+                for u in d.get("utterances", [])
+                if u.get("speaker") == "user" and "reply_index" in u
+            }
+            for d in docs
+        }
+    except Exception:
+        return {}
+
+
+def _all_name_entries(raw):
+    """Return [(name_str, [reply_indices]), ...] from a raw Fname/Lname field."""
+    if not raw or raw == "N/A":
+        return []
+    if isinstance(raw[0], str):
+        idxs = sorted([v for v in (raw[1] if len(raw) > 1 and isinstance(raw[1], list) else []) if isinstance(v, int)])
+        return [(str(raw[0]).strip(), idxs)]
+    out = []
+    for e in raw:
+        if isinstance(e, list) and e:
+            idxs = sorted([v for v in (e[1] if len(e) > 1 and isinstance(e[1], list) else []) if isinstance(v, int)])
+            out.append((str(e[0]).strip(), idxs))
+    return out
+
+
+def _build_gt(labels):
+    """
+    From agreed Labels dict return:
+      contact_at   : set of reply indices where any contact is speaking
+      fname_at     : {reply_index: name_str}
+      lname_at     : {reply_index: name_str}
+      name_entries : [(field, entry_num, name, [idxs]), ...]
+    """
+    contact_at, fname_at, lname_at, name_entries = set(), {}, {}, []
+    for sp in labels.values():
+        if not sp or sp == "N/A":
+            continue
+        cis = sp.get("contact_is_speaker", [])
+        if cis and cis != "N/A" and isinstance(cis, list):
+            contact_at.update(v for v in cis if isinstance(v, int))
+        for i, (name, idxs) in enumerate(_all_name_entries(sp.get("Fname"))):
+            for ri in idxs:
+                fname_at[ri] = name
+            name_entries.append(("fname", i, name, idxs))
+        for i, (name, idxs) in enumerate(_all_name_entries(sp.get("Lname"))):
+            for ri in idxs:
+                lname_at[ri] = name
+            name_entries.append(("lname", i, name, idxs))
+    return contact_at, fname_at, lname_at, name_entries
+
+
+def _nm(a, b):
+    """Case-insensitive name match, returns False if either is falsy."""
+    return bool(a and b and str(a).strip().lower() == str(b).strip().lower())
+
+
 def _norm_name_str(raw):
     if not raw or raw == "N/A":
         return None
@@ -340,7 +407,7 @@ if n_total == 0:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_review, tab_stats, tab_health = st.tabs(["📋 Review", "📊 Statistics", "🏥 Dataset Health"])
+tab_review, tab_stats, tab_health, tab_model = st.tabs(["📋 Review", "📊 Statistics", "🏥 Dataset Health", "🤖 Model Analysis"])
 
 # ── TAB 1: Review ─────────────────────────────────────────────────────────────
 
@@ -1039,3 +1106,286 @@ with tab_health:
         )
         avg = sum(distances) / len(distances)
         st.caption(f"Average distance: {avg:.1f} turns · Max: {max(distances)} turns · Cases: {len(distances)}")
+
+# ── TAB 4: Model Analysis ──────────────────────────────────────────────────────
+
+with tab_model:
+    _ax = {"labelColor": "#1E3A5F", "titleColor": "#1E3A5F", "gridColor": "#BFDBFE"}
+
+    # Filter to 100%-agreed conversations (same text, both annotators)
+    perfect = [
+        cid for cid in stats_both
+        if _agreement_pct(map_a[cid]["Labels"], map_b[cid]["Labels"]) >= 100.0
+    ]
+
+    mc1, mc2 = st.columns(2)
+    mc1.metric("Conversations with 100% agreement", len(perfect))
+
+    if not perfect:
+        st.info("No conversations with 100% annotator agreement found.")
+        st.stop()
+
+    model_data = _load_model_preds(tuple(sorted(perfect)))
+    qualified  = [cid for cid in perfect if cid in model_data]
+    mc2.metric("Of those — with model predictions", len(qualified))
+
+    if not qualified:
+        st.info("No model predictions found for these conversations. Run `run_model_predictions.py` first.")
+        st.stop()
+
+    st.markdown("---")
+
+    # ── Accumulate across all qualified conversations ──────────────────────────
+    m1_tp = m1_tn = m1_fp = m1_fn = 0
+    m2_rows         = []
+    m3_rows         = []
+    m4_contact_gaps = []
+    m4_fname_gaps   = []
+    m4_lname_gaps   = []
+
+    for cid in qualified:
+        labels     = map_a[cid]["Labels"]
+        turns      = map_a[cid].get("turns", [])
+        model_reps = model_data[cid]   # {reply_index: utterance_dict}
+
+        contact_at, fname_at, lname_at, name_entries = _build_gt(labels)
+
+        all_ri = sorted([
+            int(list(t.keys())[0].split(" ")[1])
+            for t in turns
+            if list(t.keys())[0].startswith("reply ")
+        ])
+        if not all_ri:
+            continue
+
+        # ── Metric 1: per-reply is_contact ────────────────────────────────────
+        for ri in all_ri:
+            gt   = ri in contact_at
+            pred = bool(model_reps.get(ri, {}).get("is_contact"))
+            if gt and pred:     m1_tp += 1
+            elif gt:            m1_fn += 1
+            elif pred:          m1_fp += 1
+            else:               m1_tn += 1
+
+        # ── Metric 2: name detection ──────────────────────────────────────────
+        n_names = n_correct_names = 0
+        for field, entry_num, gt_name, idxs in name_entries:
+            if not idxs:
+                continue
+            n_names += 1
+            first_ri  = min(idxs)
+            utt       = model_reps.get(first_ri, {})
+            model_val = utt.get("fname" if field == "fname" else "lname")
+            detected  = bool(model_val)
+            correct   = _nm(gt_name, model_val)
+            if correct:
+                n_correct_names += 1
+            m2_rows.append({
+                "Field":       field,
+                "Entry #":     entry_num,
+                "Is change":   entry_num > 0,
+                "GT name":     gt_name,
+                "First reply": first_ri,
+                "Model name":  model_val or "—",
+                "Detected":    detected,
+                "Correct":     correct,
+            })
+
+        # ── Metric 3: name count vs accuracy ──────────────────────────────────
+        m3_rows.append({
+            "n_names":   n_names,
+            "n_correct": n_correct_names,
+            "accuracy":  n_correct_names / n_names if n_names > 0 else None,
+        })
+
+        # ── Metric 4: forgetting gaps ─────────────────────────────────────────
+        # is_contact
+        last_ok = None
+        for ri in all_ri:
+            if ri not in contact_at:
+                continue
+            pred = bool(model_reps.get(ri, {}).get("is_contact"))
+            if pred:
+                last_ok = ri
+            elif last_ok is not None:
+                m4_contact_gaps.append(ri - last_ok)
+                last_ok = None
+
+        # fname
+        last_ok = None
+        for ri in all_ri:
+            gt_fn = fname_at.get(ri)
+            if not gt_fn:
+                continue
+            pred_fn = model_reps.get(ri, {}).get("fname")
+            if _nm(gt_fn, pred_fn):
+                last_ok = ri
+            elif last_ok is not None:
+                m4_fname_gaps.append(ri - last_ok)
+                last_ok = None
+
+        # lname
+        last_ok = None
+        for ri in all_ri:
+            gt_ln = lname_at.get(ri)
+            if not gt_ln:
+                continue
+            pred_ln = model_reps.get(ri, {}).get("lname")
+            if _nm(gt_ln, pred_ln):
+                last_ok = ri
+            elif last_ok is not None:
+                m4_lname_gaps.append(ri - last_ok)
+                last_ok = None
+
+    # ── Display Metric 1 ──────────────────────────────────────────────────────
+    st.markdown("### 1 · Contact identification accuracy")
+    st.caption("Per-reply: did the model predict `is_contact` correctly on each reply?")
+
+    m1_total = m1_tp + m1_tn + m1_fp + m1_fn
+    m1_acc   = (m1_tp + m1_tn) / m1_total * 100 if m1_total else 0
+    m1_prec  = m1_tp / (m1_tp + m1_fp) * 100    if (m1_tp + m1_fp) else 0
+    m1_rec   = m1_tp / (m1_tp + m1_fn) * 100    if (m1_tp + m1_fn) else 0
+    m1_f1    = 2 * m1_prec * m1_rec / (m1_prec + m1_rec) if (m1_prec + m1_rec) else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Accuracy",  f"{m1_acc:.1f}%",  help=f"{m1_tp + m1_tn} / {m1_total} replies")
+    c2.metric("Precision", f"{m1_prec:.1f}%", help="Of model True predictions, how many were correct")
+    c3.metric("Recall",    f"{m1_rec:.1f}%",  help="Of actual contact replies, how many model caught")
+    c4.metric("F1",        f"{m1_f1:.1f}%")
+
+    cm_df = pd.DataFrame({
+        "":                    ["GT: Contact", "GT: Not contact"],
+        "Model: Contact":      [m1_tp, m1_fp],
+        "Model: Not contact":  [m1_fn, m1_tn],
+    }).set_index("")
+    st.dataframe(cm_df, use_container_width=False)
+
+    st.markdown("---")
+
+    # ── Display Metric 2 ──────────────────────────────────────────────────────
+    st.markdown("### 2 · Name detection accuracy")
+    st.caption("At the first reply where each name appears, did the model detect it and get it right?")
+
+    if m2_rows:
+        m2_df = pd.DataFrame(m2_rows)
+
+        for is_change, label in [(False, "First occurrence"), (True, "Name change")]:
+            sub = m2_df[m2_df["Is change"] == is_change]
+            if sub.empty:
+                continue
+            nt = len(sub)
+            nd = int(sub["Detected"].sum())
+            nc = int(sub["Correct"].sum())
+            st.markdown(f"**{label}** — {nt} cases")
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Detected (any name)",  f"{nd/nt*100:.1f}%", help=f"{nd}/{nt}")
+            sc2.metric("Name matched GT",       f"{nc/nt*100:.1f}%", help=f"{nc}/{nt}")
+            sc3.metric("Missed entirely",       f"{(nt-nd)/nt*100:.1f}%", help=f"{nt-nd}/{nt}")
+
+        st.markdown("**Breakdown by field**")
+        for field_name in ["fname", "lname"]:
+            sub = m2_df[m2_df["Field"] == field_name]
+            if sub.empty:
+                continue
+            nt = len(sub)
+            nc = int(sub["Correct"].sum())
+            nd = int(sub["Detected"].sum())
+            st.write(f"**{field_name.capitalize()}** — {nc}/{nt} correct ({nc/nt*100:.1f}%),  {nd}/{nt} detected ({nd/nt*100:.1f}%)")
+
+        with st.expander("View all name detection events"):
+            disp = m2_df[["Field", "Is change", "GT name", "First reply", "Model name", "Detected", "Correct"]].copy()
+            disp["Is change"] = disp["Is change"].map({True: "Name change", False: "First"})
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.info("No name entries found in 100%-agreed conversations.")
+
+    st.markdown("---")
+
+    # ── Display Metric 3 ──────────────────────────────────────────────────────
+    st.markdown("### 3 · Name count vs model accuracy")
+    st.caption("Does having more names in a conversation reduce model accuracy?")
+
+    m3_df = pd.DataFrame(m3_rows)
+    m3_df = m3_df[m3_df["n_names"] > 0].copy()
+
+    if not m3_df.empty:
+        m3_df["group"] = m3_df["n_names"].clip(upper=4).map(lambda n: f"{n}" if n < 4 else "4+")
+        m3_agg = (
+            m3_df.groupby("group")
+            .agg(avg_acc=("accuracy", "mean"), n_convs=("accuracy", "count"))
+            .reset_index()
+        )
+        m3_agg["avg_acc_pct"] = (m3_agg["avg_acc"] * 100).round(1)
+        sort_order = [s for s in ["1", "2", "3", "4+"] if s in m3_agg["group"].values]
+
+        st.altair_chart(
+            alt.Chart(m3_agg)
+            .mark_bar(color="#8B5CF6")
+            .encode(
+                x=alt.X("group:N", sort=sort_order, title="Number of name entries",
+                         axis=alt.Axis(**_ax)),
+                y=alt.Y("avg_acc_pct:Q", scale=alt.Scale(domain=[0, 100]),
+                         title="Avg name accuracy (%)", axis=alt.Axis(**_ax)),
+                tooltip=[
+                    alt.Tooltip("group:N",       title="Name entries"),
+                    alt.Tooltip("avg_acc_pct:Q", title="Avg accuracy %", format=".1f"),
+                    alt.Tooltip("n_convs:Q",     title="Conversations"),
+                ],
+            )
+            .properties(height=280, background="#EFF6FF")
+            .configure_view(strokeWidth=0),
+            use_container_width=True,
+        )
+        st.dataframe(
+            m3_agg.rename(columns={"group": "Name entries", "avg_acc_pct": "Avg accuracy (%)", "n_convs": "Conversations"})[
+                ["Name entries", "Conversations", "Avg accuracy (%)"]
+            ],
+            hide_index=True, use_container_width=False,
+        )
+    else:
+        st.info("Not enough data for name count analysis.")
+
+    st.markdown("---")
+
+    # ── Display Metric 4 ──────────────────────────────────────────────────────
+    st.markdown("### 4 · Forgetting — how long until the model loses context")
+    st.caption(
+        "A forgetting event occurs when the model was previously correct on a reply "
+        "but gives a wrong answer on a later reply where GT still expects the same answer. "
+        "Gap = number of replies between last correct and first wrong."
+    )
+
+    for m4_label, m4_gaps, m4_color in [
+        ("Contact identification (is_contact)", m4_contact_gaps, "#3B82F6"),
+        ("First name (fname)",                  m4_fname_gaps,   "#10B981"),
+        ("Last name (lname)",                   m4_lname_gaps,   "#F59E0B"),
+    ]:
+        st.markdown(f"**{m4_label}**")
+        if not m4_gaps:
+            st.caption("No forgetting events detected.")
+            st.markdown("---")
+            continue
+
+        avg_gap = sum(m4_gaps) / len(m4_gaps)
+        med_gap = sorted(m4_gaps)[len(m4_gaps) // 2]
+
+        gc1, gc2, gc3 = st.columns(3)
+        gc1.metric("Forgetting events",      len(m4_gaps))
+        gc2.metric("Avg gap (replies)",      f"{avg_gap:.1f}")
+        gc3.metric("Median gap (replies)",   med_gap)
+
+        gap_df = pd.DataFrame({"Gap": m4_gaps})
+        st.altair_chart(
+            alt.Chart(gap_df)
+            .mark_bar(color=m4_color)
+            .encode(
+                x=alt.X("Gap:Q", bin=alt.Bin(step=1), title="Replies until forgotten",
+                         axis=alt.Axis(**_ax)),
+                y=alt.Y("count():Q", title="Events", axis=alt.Axis(**_ax)),
+                tooltip=[alt.Tooltip("Gap:Q", bin=True, title="Gap"), "count():Q"],
+            )
+            .properties(height=200, background="#EFF6FF")
+            .configure_view(strokeWidth=0),
+            use_container_width=True,
+        )
+        st.markdown("---")
