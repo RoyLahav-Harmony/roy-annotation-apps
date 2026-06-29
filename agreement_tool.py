@@ -1397,7 +1397,7 @@ with tab_model:
             m2_full = pd.DataFrame(m2_rows)
             m2_full["group"] = m2_full["chat_id"].map(
                 lambda c: m3_df.set_index("chat_id")["n_names"].get(c, 0)
-            ).apply(lambda n: str(n) if n < 4 else "4+")
+            ).apply(lambda n: str(n))
 
             detail = m2_full[m2_full["group"] == selected_group].copy()
             mistakes = detail[detail["Correct"] == False]
