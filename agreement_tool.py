@@ -1198,10 +1198,15 @@ with tab_model:
 
         # ── Metric 2: name detection ──────────────────────────────────────────
         n_names = n_correct_names = 0
+        fname_seq = lname_seq = 0
         for field, entry_num, gt_name, idxs in name_entries:
             if not idxs:
                 continue
             n_names += 1
+            if field == "fname":
+                seq_num = fname_seq; fname_seq += 1
+            else:
+                seq_num = lname_seq; lname_seq += 1
             first_ri  = min(idxs)
             utt       = model_reps.get(first_ri, {})
             model_val = utt.get("fname" if field == "fname" else "lname")
@@ -1212,7 +1217,7 @@ with tab_model:
             m2_rows.append({
                 "chat_id":     cid,
                 "Field":       field,
-                "Entry #":     entry_num,
+                "Entry #":     seq_num,
                 "Is change":   entry_num > 0,
                 "GT name":     gt_name,
                 "First reply": first_ri,
@@ -1341,14 +1346,14 @@ with tab_model:
     m3_df = m3_df[m3_df["n_names"] > 0].copy()
 
     if not m3_df.empty:
-        m3_df["group"] = m3_df["n_names"].clip(upper=4).map(lambda n: f"{n}" if n < 4 else "4+")
+        m3_df["group"] = m3_df["n_names"].astype(str)
         m3_agg = (
             m3_df.groupby("group")
             .agg(avg_acc=("accuracy", "mean"), n_convs=("accuracy", "count"))
             .reset_index()
         )
         m3_agg["avg_acc_pct"] = (m3_agg["avg_acc"] * 100).round(1)
-        sort_order = [s for s in ["1", "2", "3", "4+"] if s in m3_agg["group"].values]
+        sort_order = sorted(m3_agg["group"].unique(), key=lambda x: int(x))
 
         m3_sel = alt.selection_point(fields=["group"], name="m3_sel")
         m3_chart = (
