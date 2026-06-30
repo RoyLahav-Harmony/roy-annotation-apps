@@ -1123,9 +1123,15 @@ with left:
                 ins_icon = "✕" if inserting_after == turn_idx else "➕"
                 ins_tip  = "Cancel insert" if inserting_after == turn_idx else "Insert a turn after this one"
                 if st.button(ins_icon, key=f"ins_btn__{chat_id}__{turn_idx}", help=ins_tip):
+                    opening = inserting_after != turn_idx
                     st.session_state[f"inserting_after__{chat_id}"] = (
-                        None if inserting_after == turn_idx else turn_idx
+                        turn_idx if opening else None
                     )
+                    # Default the new turn to the opposite type of the clicked turn
+                    # (Agent after a User reply, User after an Agent turn).
+                    if opening:
+                        clicked_is_reply = list(working_turns[turn_idx].keys())[0].startswith("reply ")
+                        st.session_state[f"ins_type__{chat_id}"] = "Agent" if clicked_is_reply else "User"
                     st.session_state[f"active_edit__{chat_id}"] = None
                     st.rerun()
             with del_col:
