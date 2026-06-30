@@ -557,6 +557,7 @@ def _ingest_conversations(data, label):
 source_mode = st.radio(
     "Load conversations from:",
     ["📂 Upload a file", "☁️ MongoDB project"],
+    index=1,
     horizontal=True,
     label_visibility="collapsed",
 )
