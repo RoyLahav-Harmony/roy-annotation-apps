@@ -38,6 +38,17 @@ def _load_project_annotations(project_name):
     except Exception:
         return []
 
+@st.cache_data(ttl=300, show_spinner="Loading rearranged annotations…")
+def _load_rearranged(annotator):
+    """{chat_id: [utterances]} for one annotator from contact_discovery_rearranged."""
+    try:
+        docs = _get_mongo_client()["roy's_projects"]["contact_discovery_rearranged"].find(
+            {"annotator": annotator}, {"_id": 0}
+        )
+        return {d["chat_id"]: d.get("utterances", []) for d in docs}
+    except Exception:
+        return {}
+
 st.set_page_config(page_title="Agreement Tool", layout="wide", page_icon="🤝")
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -343,6 +354,66 @@ def _agreement_pct(labels_a, labels_b):
                 agrees += 1
     return (agrees / total * 100) if total else 100.0
 
+# ── Per-utterance comparison (contact_discovery_rearranged) ────────────────────
+
+UTT_FIELDS = [
+    ("is_contact",                "Is contact"),
+    ("fname",                     "First name"),
+    ("lname",                     "Last name"),
+    ("intro_includes_name",       "Intro includes name"),
+    ("intro_doesnt_include_name", "Intro excludes name"),
+    ("contact_name_known",        "Name known"),
+]
+
+def _reply_map(utterances):
+    """{reply_index: utterance_dict} for the user turns of one rearranged doc."""
+    return {
+        u["reply_index"]: u
+        for u in utterances
+        if u.get("speaker") == "user" and "reply_index" in u
+    }
+
+def _utt_nonempty(field, v):
+    """Whether an annotator actually gave this field a value on an utterance."""
+    if field == "is_contact":
+        return bool(v)
+    if field in ("intro_includes_name", "intro_doesnt_include_name"):
+        return v is True
+    if field == "contact_name_known":
+        return v is not None
+    return v not in (None, "")          # fname / lname
+
+def _utt_eq(field, a, b):
+    """Field-level equality between two annotators (names compared exactly)."""
+    if field == "is_contact":
+        return bool(a) == bool(b)
+    na = a if a not in (None, "") else None
+    nb = b if b not in (None, "") else None
+    return na == nb
+
+def _fmt_utt(field, v):
+    if field == "is_contact":
+        return "True" if v else "False"
+    if v is None or v == "":
+        return "—"
+    return str(v)
+
+def _utt_agreement_pct(rmap_a, rmap_b):
+    """% agreement over every field on every user utterance.
+
+    All six fields are counted on each utterance, including ones both
+    annotators left blank (a blank/blank match counts as agreement).
+    """
+    total = agree = 0
+    for ri in set(rmap_a) | set(rmap_b):
+        ua = rmap_a.get(ri, {})
+        ub = rmap_b.get(ri, {})
+        for f, _ in UTT_FIELDS:
+            total += 1
+            if _utt_eq(f, ua.get(f), ub.get(f)):
+                agree += 1
+    return (agree / total * 100) if total else 100.0
+
 # ── Data source ───────────────────────────────────────────────────────────────
 
 st.markdown("## 🤝 Agreement Tool")
@@ -422,15 +493,26 @@ both = sorted([
 ])
 n_total = len(both)
 
+# Old per-contact joint set, version-filtered — used by the Dataset Health and
+# Model Analysis tabs, which still read the contact_discovery collection.
+skipped_cids = {cid for cid in both if map_a[cid].get("turns") != map_b[cid].get("turns")}
+stats_both   = [cid for cid in both if cid not in skipped_cids]
+
+# Per-utterance annotations from contact_discovery_rearranged — used by the
+# Review and Statistics tabs (compare each utterance's labels, not contacts).
+rutt_a   = _load_rearranged(name_a)
+rutt_b   = _load_rearranged(name_b)
+both_utt = sorted(set(rutt_a) & set(rutt_b))
+
 total_a = sum(1 for c in map_a.values() if "Labels" in c)
 total_b = sum(1 for c in map_b.values() if "Labels" in c)
 st.caption(
     f"{name_a}: {total_a} labeled  ·  "
     f"{name_b}: {total_b} labeled  ·  "
-    f"Both labeled: **{n_total}**"
+    f"Both (per-utterance set): **{len(both_utt)}**"
 )
 
-if n_total == 0:
+if not both and not both_utt:
     st.warning(f"No conversations are labeled by both {name_a} and {name_b}.")
     st.stop()
 
@@ -442,9 +524,18 @@ tab_review, tab_stats, tab_health, tab_model = st.tabs(["📋 Review", "📊 Sta
 
 with tab_review:
 
+    if not both_utt:
+        st.warning("No conversations labeled by both annotators were found in "
+                   "contact_discovery_rearranged.")
+        st.stop()
+
     only_disagree = st.checkbox("Show only conversations with disagreements", value=False)
-    review_list = [cid for cid in both
-                   if not only_disagree or _agreement_pct(map_a[cid]["Labels"], map_b[cid]["Labels"]) < 100]
+
+    def _conv_agree(cid):
+        return _utt_agreement_pct(_reply_map(rutt_a[cid]), _reply_map(rutt_b[cid]))
+
+    review_list = [cid for cid in both_utt
+                   if not only_disagree or _conv_agree(cid) < 100]
     if not review_list:
         st.info("No conversations match the current filter.")
         st.stop()
@@ -472,15 +563,15 @@ with tab_review:
         st.session_state["_ag_idx"] = idx + 1
         st.rerun()
 
-    cid      = review_list[idx]
-    conv_a   = map_a[cid]
-    conv_b   = map_b[cid]
-    labels_a = conv_a.get("Labels", {})
-    labels_b = conv_b.get("Labels", {})
+    cid    = review_list[idx]
+    utts_a = rutt_a[cid]
+    utts_b = rutt_b[cid]
+    rmap_a = _reply_map(utts_a)
+    rmap_b = _reply_map(utts_b)
 
-    turns_a = conv_a.get("turns", [])
-    turns_b = conv_b.get("turns", [])
-    versions_differ = turns_a != turns_b
+    texts_a = [u.get("text", "") for u in utts_a]
+    texts_b = [u.get("text", "") for u in utts_b]
+    versions_differ = texts_a != texts_b
     _version = st.radio(
         "Conversation version:",
         [f"📄 {name_a}'s version", f"📄 {name_b}'s version"],
@@ -489,9 +580,9 @@ with tab_review:
         label_visibility="collapsed",
         captions=["", "⚠️ Text differs" if versions_differ else ""],
     )
-    turns = turns_a if _version.startswith(f"📄 {name_a}") else turns_b
+    disp_utts = utts_a if _version.startswith(f"📄 {name_a}") else utts_b
 
-    pct       = _agreement_pct(labels_a, labels_b)
+    pct       = _utt_agreement_pct(rmap_a, rmap_b)
     badge_cls = "badge-agree" if pct >= 80 else "badge-disagree"
 
     st.markdown(
@@ -507,13 +598,13 @@ with tab_review:
     with left:
         st.markdown("**Conversation**")
         with st.container(height=680):
-            for turn in turns:
-                key      = list(turn.keys())[0]
-                text     = turn[key]
-                is_reply = key.startswith("reply ")
-                label_tag = f"Reply {key.split(' ', 1)[1]}" if is_reply else "Agent"
-                css       = "turn-reply" if is_reply else "turn-assistant"
-                lbl_cls   = "reply-label" if is_reply else "asst-label"
+            for u in sorted(disp_utts, key=lambda x: x.get("turn_index", 0)):
+                text     = u.get("text", "")
+                is_reply = u.get("speaker") == "user"
+                if is_reply:
+                    label_tag, css, lbl_cls = f"Reply {u.get('reply_index')}", "turn-reply", "reply-label"
+                else:
+                    label_tag, css, lbl_cls = "Agent", "turn-assistant", "asst-label"
                 st.markdown(
                     f'<div class="{css}">'
                     f'<div class="turn-label {lbl_cls}">{label_tag}</div>'
@@ -522,64 +613,51 @@ with tab_review:
                 )
 
     with right:
-        st.markdown("**Annotation Comparison**")
+        st.markdown("**Per-utterance label comparison**")
 
-        all_sp_keys = sorted(
-            set(list(labels_a.keys()) + list(labels_b.keys())),
-            key=lambda k: int(k.split(" ")[1]) if len(k.split(" ")) > 1 and k.split(" ")[1].isdigit() else 0,
-        )
-
-        if not all_sp_keys:
-            st.info("No speaker annotations found in either file.")
+        all_ri = sorted(set(rmap_a) | set(rmap_b))
+        if not all_ri:
+            st.info("No user utterances in this conversation.")
         else:
             with st.container(height=680):
-                for sp_key in all_sp_keys:
-                    sp_num = sp_key.split(" ")[-1]
-                    sa = labels_a.get(sp_key)
-                    sb = labels_b.get(sp_key)
-                    fa = _extract_fields(sa)
-                    fb = _extract_fields(sb)
+                for ri in all_ri:
+                    ua = rmap_a.get(ri, {})
+                    ub = rmap_b.get(ri, {})
 
                     st.markdown(
-                        f'<div class="contact-header">Contact {sp_num}</div>',
+                        f'<div class="contact-header">Reply {ri}</div>',
                         unsafe_allow_html=True,
                     )
 
                     hc1, hc2, hc3, hc4 = st.columns([2, 3, 3, 0.7])
-                    hc1.markdown("<small><b>Field</b></small>", unsafe_allow_html=True)
+                    hc1.markdown("<small><b>Label</b></small>", unsafe_allow_html=True)
                     hc2.markdown(f"<small><b>{name_a}</b></small>", unsafe_allow_html=True)
                     hc3.markdown(f"<small><b>{name_b}</b></small>", unsafe_allow_html=True)
                     hc4.markdown("<small><b>✓</b></small>", unsafe_allow_html=True)
 
                     st.markdown("<hr/>", unsafe_allow_html=True)
 
-                    all_fields = list(fa.keys()) or list(fb.keys())
-                    for field in all_fields:
-                        val_a  = fa.get(field)
-                        val_b  = fb.get(field)
-                        agreed = _eq(val_a, val_b)
+                    for f, lbl in UTT_FIELDS:
+                        a = ua.get(f)
+                        b = ub.get(f)
+                        agreed = _utt_eq(f, a, b)
                         colour = "#065F46" if agreed else "#991B1B"
                         icon   = "✅" if agreed else "❌"
 
                         rc1, rc2, rc3, rc4 = st.columns([2, 3, 3, 0.7])
                         rc1.markdown(
-                            f"<small style='color:#475569'><b>{field}</b></small>",
+                            f"<small style='color:#475569'><b>{lbl}</b></small>",
                             unsafe_allow_html=True,
                         )
                         rc2.markdown(
-                            f"<small style='color:{colour}'>{_html.escape(_fmt(val_a))}</small>",
+                            f"<small style='color:{colour}'>{_html.escape(_fmt_utt(f, a))}</small>",
                             unsafe_allow_html=True,
                         )
                         rc3.markdown(
-                            f"<small style='color:{colour}'>{_html.escape(_fmt(val_b))}</small>",
+                            f"<small style='color:{colour}'>{_html.escape(_fmt_utt(f, b))}</small>",
                             unsafe_allow_html=True,
                         )
                         rc4.markdown(icon)
-
-                    if sa is None:
-                        st.caption(f"⚠ {name_a} did not annotate this contact")
-                    elif sb is None:
-                        st.caption(f"⚠ {name_b} did not annotate this contact")
 
                     st.markdown("---")
 
@@ -587,270 +665,132 @@ with tab_review:
 
 with tab_stats:
 
-    field_disagree = {}
-    field_total    = {}
-
-    NAME_FIELDS = {"First name": "Fname", "Last name": "Lname"}
-    name_presence = {f: {"agree": 0, "differ": 0, f"{name_a}_only": 0,
-                         f"{name_b}_only": 0, "both_na": 0} for f in NAME_FIELDS}
-
-    TURN_FIELDS = ["First name turns", "Last name turns",
-                   "Speaker is contact", "Intro includes name", "Intro excludes name"]
-    turn_bias = {f: {f"{name_a}_earlier": 0, f"{name_b}_earlier": 0,
-                     f"{name_a}_wider": 0, f"{name_b}_wider": 0,
-                     f"{name_a}_only": 0, f"{name_b}_only": 0,
-                     "agree": 0, "both_na": 0, "total": 0} for f in TURN_FIELDS}
-
-    skipped_cids = {cid for cid in both
-                    if map_a[cid].get("turns") != map_b[cid].get("turns")}
-    stats_both = [cid for cid in both if cid not in skipped_cids]
-
-    if skipped_cids:
-        st.info(
-            f"ℹ️ {len(skipped_cids)} conversation(s) excluded from statistics "
-            f"because the two annotators saw different versions of the text."
-        )
-
-    for cid in stats_both:
-        la = map_a[cid]["Labels"]
-        lb = map_b[cid]["Labels"]
-        for sp_key in set(list(la.keys()) + list(lb.keys())):
-            sa = la.get(sp_key, {}) or {}
-            sb = lb.get(sp_key, {}) or {}
-            fa = _extract_fields(sa)
-            fb = _extract_fields(sb)
-
-            for field in set(list(fa.keys()) + list(fb.keys())):
-                field_total[field]    = field_total.get(field, 0) + 1
-                if not _eq(fa.get(field), fb.get(field)):
-                    field_disagree[field] = field_disagree.get(field, 0) + 1
-
-            for label, raw_key in NAME_FIELDS.items():
-                na_str = _norm_name_str(sa.get(raw_key))
-                nb_str = _norm_name_str(sb.get(raw_key))
-                if na_str is None and nb_str is None:
-                    name_presence[label]["both_na"] += 1
-                elif na_str is not None and nb_str is None:
-                    name_presence[label][f"{name_a}_only"] += 1
-                elif na_str is None and nb_str is not None:
-                    name_presence[label][f"{name_b}_only"] += 1
-                elif na_str.lower() == nb_str.lower():
-                    name_presence[label]["agree"] += 1
-                else:
-                    name_presence[label]["differ"] += 1
-
-            def _get_turns(field, sp_a, sp_b):
-                if field == "First name turns":
-                    return _name_turns_field(sp_a.get("Fname")), _name_turns_field(sp_b.get("Fname"))
-                if field == "Last name turns":
-                    return _name_turns_field(sp_a.get("Lname")), _name_turns_field(sp_b.get("Lname"))
-                key_map = {
-                    "Speaker is contact":  "contact_is_speaker",
-                    "Intro includes name": "intro_includes_name",
-                    "Intro excludes name": "intro_doesnt_include_name",
-                }
-                k = key_map.get(field)
-                return _norm_turns(sp_a.get(k)), _norm_turns(sp_b.get(k))
-
-            for tf in TURN_FIELDS:
-                ta, tb = _get_turns(tf, sa, sb)
-                turn_bias[tf]["total"] += 1
-                if ta is None and tb is None:
-                    turn_bias[tf]["both_na"] += 1
-                elif ta is not None and tb is None:
-                    turn_bias[tf][f"{name_a}_only"] += 1
-                elif ta is None and tb is not None:
-                    turn_bias[tf][f"{name_b}_only"] += 1
-                elif ta == tb:
-                    turn_bias[tf]["agree"] += 1
-                else:
-                    start_a = min(ta) if ta else None
-                    start_b = min(tb) if tb else None
-                    if start_a is not None and start_b is not None:
-                        if start_a < start_b:
-                            turn_bias[tf][f"{name_a}_earlier"] += 1
-                        elif start_b < start_a:
-                            turn_bias[tf][f"{name_b}_earlier"] += 1
-                    if len(ta) > len(tb):
-                        turn_bias[tf][f"{name_a}_wider"] += 1
-                    elif len(tb) > len(ta):
-                        turn_bias[tf][f"{name_b}_wider"] += 1
-
-    if not field_total:
-        st.info("No field data found.")
+    if not both_utt:
+        st.warning("No conversations labeled by both annotators were found in "
+                   "contact_discovery_rearranged.")
         st.stop()
 
-    st.markdown("### Overall disagreement rate per field")
-    st.caption(f"Across {len(stats_both)} jointly-labeled conversations with identical text"
-               + (f" ({len(skipped_cids)} excluded due to differing versions)" if skipped_cids else ""))
+    # Exclude conversations where the two annotators saw different utterance text
+    utt_skipped = {
+        cid for cid in both_utt
+        if [u.get("text") for u in rutt_a[cid]] != [u.get("text") for u in rutt_b[cid]]
+    }
+    stats_list = [cid for cid in both_utt if cid not in utt_skipped]
 
+    if utt_skipped:
+        st.info(
+            f"ℹ️ {len(utt_skipped)} conversation(s) excluded because the two "
+            f"annotators saw different versions of the text."
+        )
+
+    field_total    = {f: 0 for f, _ in UTT_FIELDS}
+    field_disagree = {f: 0 for f, _ in UTT_FIELDS}
+    breakdown = {f: {"agree": 0, "differ": 0,
+                     f"{name_a}_only": 0, f"{name_b}_only": 0}
+                 for f, _ in UTT_FIELDS}
+    n_utts = n_utts_disagree = 0
+
+    for cid in stats_list:
+        rmap_a = _reply_map(rutt_a[cid])
+        rmap_b = _reply_map(rutt_b[cid])
+        for ri in sorted(set(rmap_a) | set(rmap_b)):
+            ua = rmap_a.get(ri, {})
+            ub = rmap_b.get(ri, {})
+            n_utts += 1
+            utt_has_disagree = False
+            for f, _ in UTT_FIELDS:
+                a = ua.get(f)
+                b = ub.get(f)
+                field_total[f] += 1
+                if _utt_eq(f, a, b):
+                    breakdown[f]["agree"] += 1
+                else:
+                    field_disagree[f] += 1
+                    utt_has_disagree = True
+                    na = _utt_nonempty(f, a)
+                    nb = _utt_nonempty(f, b)
+                    if na and not nb:
+                        breakdown[f][f"{name_a}_only"] += 1
+                    elif nb and not na:
+                        breakdown[f][f"{name_b}_only"] += 1
+                    else:
+                        breakdown[f]["differ"] += 1
+            if utt_has_disagree:
+                n_utts_disagree += 1
+
+    if n_utts == 0:
+        st.info("No user utterances to compare.")
+        st.stop()
+
+    total_points = sum(field_total.values())
+    total_dis    = sum(field_disagree.values())
+
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("User utterances compared", n_utts)
+    mc2.metric("Utterances with a disagreement", n_utts_disagree,
+               help=f"{n_utts_disagree}/{n_utts} = {n_utts_disagree / n_utts * 100:.1f}%")
+    mc3.metric("Overall label disagreement",
+               f"{(total_dis / total_points * 100) if total_points else 0:.1f}%",
+               help=f"{total_dis}/{total_points} field comparisons")
+
+    st.caption(
+        f"Across {len(stats_list)} jointly-labeled conversations"
+        + (f" ({len(utt_skipped)} excluded due to differing text)" if utt_skipped else "")
+        + ". Every one of the six labels is compared on every user utterance, "
+        "including ones both annotators left blank (a blank/blank match counts "
+        "as agreement)."
+    )
+
+    st.markdown("### Disagreement rate per label")
     rows = []
-    for field in field_total:
-        total    = field_total[field]
-        disagree = field_disagree.get(field, 0)
+    for f, lbl in UTT_FIELDS:
+        tot = field_total[f]
+        dis = field_disagree[f]
         rows.append({
-            "Field":                  field,
-            "Disagreement rate (%)":  round(disagree / total * 100, 1),
-            "Disagreements":          disagree,
-            "Total comparisons":      total,
+            "Label":                 lbl,
+            "Disagreement rate (%)": round(dis / tot * 100, 1) if tot else 0.0,
+            "Disagreements":         dis,
+            "Comparison points":     tot,
         })
     rows.sort(key=lambda r: r["Disagreement rate (%)"], reverse=True)
-    df = pd.DataFrame(rows).set_index("Field")
+    df = pd.DataFrame(rows)
 
     chart = (
-        alt.Chart(df.reset_index())
+        alt.Chart(df)
         .mark_bar(color="#3B82F6")
         .encode(
             x=alt.X("Disagreement rate (%):Q", scale=alt.Scale(domain=[0, 100]),
                     axis=alt.Axis(labelColor="#1E3A5F", titleColor="#1E3A5F",
                                   gridColor="#BFDBFE")),
-            y=alt.Y("Field:N", sort="-x",
+            y=alt.Y("Label:N", sort="-x",
                     axis=alt.Axis(labelColor="#1E3A5F", titleColor="#1E3A5F")),
-            tooltip=["Field:N",
+            tooltip=["Label:N",
                      alt.Tooltip("Disagreement rate (%):Q", format=".1f"),
-                     "Disagreements:Q", "Total comparisons:Q"],
+                     "Disagreements:Q", "Comparison points:Q"],
         )
-        .properties(height=380, background="#EFF6FF")
+        .properties(height=300, background="#EFF6FF")
         .configure_view(strokeWidth=0)
     )
     st.altair_chart(chart, use_container_width=True)
 
     st.markdown("---")
-
-    st.markdown("### Name presence breakdown")
+    st.markdown("### Breakdown per label")
     st.caption(
-        f"Each bar shows one field. "
-        f"Left (blue) = only {name_a} labeled it. "
-        f"Centre (green) = both agreed. "
-        f"Right (orange) = only {name_b} labeled it."
+        f"'Agree' and 'Differ' are cases where both annotators labeled the field. "
+        f"'Only {name_a}' / 'Only {name_b}' = one labeled it, the other left it empty."
     )
-
-    range_rows = []
-    extra_rows  = []
-    for label in NAME_FIELDS:
-        counts = name_presence[label]
-        total  = sum(counts.values()) or 1
-        a_pct     = counts[f"{name_a}_only"] / total * 100
-        b_pct     = counts[f"{name_b}_only"] / total * 100
-        agree_pct = counts["agree"]   / total * 100
-        half      = agree_pct / 2
-
-        range_rows += [
-            {"Field": label, "Category": f"Only {name_a}",
-             "x1": -(a_pct + half), "x2": -half,
-             "Count": counts[f"{name_a}_only"], "Pct": round(a_pct, 1)},
-            {"Field": label, "Category": "Both agree",
-             "x1": -half, "x2": half,
-             "Count": counts["agree"], "Pct": round(agree_pct, 1)},
-            {"Field": label, "Category": f"Only {name_b}",
-             "x1": half, "x2": half + b_pct,
-             "Count": counts[f"{name_b}_only"], "Pct": round(b_pct, 1)},
-        ]
-
-    range_df = pd.DataFrame(range_rows)
-    cat_order = [f"Only {name_a}", "Both agree", f"Only {name_b}"]
-    name_chart = (
-        alt.Chart(range_df)
-        .mark_bar(height=30)
-        .encode(
-            y=alt.Y("Field:N",
-                    axis=alt.Axis(labelColor="#1E3A5F", titleColor="#1E3A5F",
-                                  labelFontSize=13, title=None)),
-            x=alt.X("x1:Q",
-                    title=f"← Only {name_a} (%)   |   Only {name_b} (%) →",
-                    axis=alt.Axis(labelColor="#1E3A5F", titleColor="#1E3A5F",
-                                  gridColor="#BFDBFE")),
-            x2=alt.X2("x2:Q"),
-            color=alt.Color("Category:N",
-                            sort=cat_order,
-                            scale=alt.Scale(domain=cat_order,
-                                            range=["#3B82F6", "#10B981", "#F59E0B"]),
-                            legend=alt.Legend(labelColor="#1E3A5F", titleColor="#1E3A5F",
-                                              orient="bottom")),
-            tooltip=[
-                alt.Tooltip("Field:N"),
-                alt.Tooltip("Category:N"),
-                alt.Tooltip("Count:Q",  title="Count"),
-                alt.Tooltip("Pct:Q",    title="%", format=".1f"),
-            ],
-        )
-        .properties(height=alt.Step(70), background="#EFF6FF")
-        .configure_view(strokeWidth=0)
-    )
-    st.altair_chart(name_chart, use_container_width=True)
-
-    st.markdown("---")
-
-    st.markdown("### Turn range bias")
-    st.caption(
-        f"Blue bars (left) = {name_a}'s tendency · Orange bars (right) = {name_b}'s tendency · "
-        f"Longer bar = stronger lean"
-    )
-
-    METRICS = [
-        ("Starts earlier",        f"{name_a}_earlier", f"{name_b}_earlier"),
-        ("Wider range",           f"{name_a}_wider",   f"{name_b}_wider"),
-        ("Has value, other N/A",  f"{name_a}_only",    f"{name_b}_only"),
-    ]
-
-    tornado_rows = []
-    label_order  = []
-    for tf in TURN_FIELDS:
-        b     = turn_bias[tf]
-        denom = b["total"] or 1
-        for metric, a_key, b_key in METRICS:
-            row_label = f"{tf}  ·  {metric}"
-            label_order.append(row_label)
-            a_pct = b.get(a_key, 0) / denom * 100
-            b_pct = b.get(b_key, 0) / denom * 100
-            tornado_rows += [
-                {"Label": row_label, "Field": tf, "Metric": metric,
-                 "Annotator": name_a, "Value": -round(a_pct, 1),
-                 "Pct": round(a_pct, 1), "Count": b.get(a_key, 0)},
-                {"Label": row_label, "Field": tf, "Metric": metric,
-                 "Annotator": name_b, "Value":  round(b_pct, 1),
-                 "Pct": round(b_pct, 1), "Count": b.get(b_key, 0)},
-            ]
-
-    tornado_df = pd.DataFrame(tornado_rows)
-
-    bars = (
-        alt.Chart(tornado_df)
-        .mark_bar()
-        .encode(
-            y=alt.Y("Label:N", sort=label_order, title=None,
-                    axis=alt.Axis(labelColor="#1E3A5F", labelLimit=320, labelFontSize=11)),
-            x=alt.X("Value:Q",
-                    title=f"← {name_a} (%)   |   {name_b} (%) →",
-                    axis=alt.Axis(labelColor="#1E3A5F", titleColor="#1E3A5F",
-                                  gridColor="#BFDBFE")),
-            color=alt.Color("Annotator:N",
-                            scale=alt.Scale(domain=[name_a, name_b],
-                                            range=["#3B82F6", "#F59E0B"]),
-                            legend=alt.Legend(labelColor="#1E3A5F", titleColor="#1E3A5F",
-                                              orient="bottom")),
-            tooltip=[
-                alt.Tooltip("Field:N"),
-                alt.Tooltip("Metric:N"),
-                alt.Tooltip("Annotator:N"),
-                alt.Tooltip("Count:Q",  title="Count"),
-                alt.Tooltip("Pct:Q",    title="% of total", format=".1f"),
-            ],
-        )
-    )
-
-    zero_line = (
-        alt.Chart(pd.DataFrame({"x": [0]}))
-        .mark_rule(color="#334155", strokeWidth=1.5)
-        .encode(x=alt.X("x:Q"))
-    )
-
-    tornado_chart = (
-        (bars + zero_line)
-        .properties(height=alt.Step(22), background="#EFF6FF")
-        .configure_view(strokeWidth=0)
-    )
-    st.altair_chart(tornado_chart, use_container_width=True)
+    brows = []
+    for f, lbl in UTT_FIELDS:
+        b = breakdown[f]
+        brows.append({
+            "Label":             lbl,
+            "Comparison points": field_total[f],
+            "Agree":             b["agree"],
+            "Differ":            b["differ"],
+            f"Only {name_a}":    b[f"{name_a}_only"],
+            f"Only {name_b}":    b[f"{name_b}_only"],
+        })
+    st.dataframe(pd.DataFrame(brows), hide_index=True, use_container_width=True)
 
 # ── TAB 3: Dataset Health ──────────────────────────────────────────────────────
 
