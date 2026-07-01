@@ -114,21 +114,21 @@ def _get_source_collection(project_name="contact_discovery"):
     except Exception:
         return None
 
-@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
+@st.cache_data(ttl=3600, max_entries=4)  # re-query MongoDB at most once per hour
 def _list_source_projects():
     try:
         return sorted(_get_mongo_client()["Roy_source_files"].list_collection_names())
     except Exception:
         return []
 
-@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
+@st.cache_data(ttl=3600, max_entries=4)  # re-query MongoDB at most once per hour
 def _load_source_project(project_name):
     try:
         return list(_get_mongo_client()["Roy_source_files"][project_name].find({}, {"_id": 0}))
     except Exception:
         return []
 
-@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
+@st.cache_data(ttl=3600, max_entries=4)  # re-query MongoDB at most once per hour
 def _list_annotation_projects():
     try:
         return sorted(_get_mongo_client()["roy's_projects"].list_collection_names())
@@ -147,10 +147,19 @@ def _load_my_annotations(project_name, annotator):
 
 try:
     from spellchecker import SpellChecker as _SpellChecker
-    _spell = _SpellChecker()
     SPELLCHECK = True
 except ImportError:
     SPELLCHECK = False
+
+# Build the checker lazily on first use. Constructing it loads a ~160k-word
+# dictionary (~30MB); doing it at import made every session pay that cost up
+# front (before login), which pushed the Cloud instance over its memory cap.
+_spell = None
+def _get_spell():
+    global _spell
+    if _spell is None:
+        _spell = _SpellChecker()
+    return _spell
 
 st.set_page_config(page_title="Contact Discovery Annotator", layout="wide", page_icon="🔍")
 
@@ -821,10 +830,13 @@ def _spell_check(text):
     words = re.findall(r"\b[a-zA-Z']{2,}\b", text)
     # Exclude words already present in the source file (proper nouns, domain terms)
     novel_words = [w for w in words if w.lower() not in source_words]
-    misspelled = _spell.unknown(novel_words)
+    if not novel_words:
+        return []
+    sp = _get_spell()
+    misspelled = sp.unknown(novel_words)
     results = []
     for w in misspelled:
-        candidates = list((_spell.candidates(w) or set()) - {w})[:3]
+        candidates = list((sp.candidates(w) or set()) - {w})[:3]
         results.append((w, candidates))
     return results
 
