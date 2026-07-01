@@ -114,18 +114,21 @@ def _get_source_collection(project_name="contact_discovery"):
     except Exception:
         return None
 
+@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
 def _list_source_projects():
     try:
         return sorted(_get_mongo_client()["Roy_source_files"].list_collection_names())
     except Exception:
         return []
 
+@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
 def _load_source_project(project_name):
     try:
         return list(_get_mongo_client()["Roy_source_files"][project_name].find({}, {"_id": 0}))
     except Exception:
         return []
 
+@st.cache_data(ttl=3600)  # re-query MongoDB at most once per hour
 def _list_annotation_projects():
     try:
         return sorted(_get_mongo_client()["roy's_projects"].list_collection_names())
@@ -527,8 +530,13 @@ if not st.session_state.get("authenticated"):
     st.stop()
 
 annotator_name = st.session_state["annotator_name"]
-_cap_col, _logout_col = st.columns([6, 1])
+_cap_col, _refresh_col, _logout_col = st.columns([5, 1, 1])
 _cap_col.caption(f"Logged in as **{annotator_name}**")
+if _refresh_col.button("🔄 Refresh", use_container_width=True,
+                       help="Re-check MongoDB now for newly added projects or files "
+                            "(otherwise data refreshes automatically once an hour)."):
+    st.cache_data.clear()
+    st.rerun()
 if _logout_col.button("Log out", use_container_width=True):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -576,6 +584,12 @@ else:
         st.error(f"MongoDB connection failed: {_mongo_err}")
 
     projects = _list_source_projects() if _mongo_ok else []
+    if _mongo_ok:
+        if st.button("🔄 Refresh from MongoDB",
+                     help="Re-check MongoDB now for newly added projects or files "
+                          "(otherwise the list refreshes automatically once an hour)."):
+            st.cache_data.clear()
+            st.rerun()
     if _mongo_ok and not projects:
         st.warning("No projects found in MongoDB. Upload source files to the Roy_source_files database via Compass.")
     else:
@@ -1401,7 +1415,7 @@ with left:
                     resp = requests.get(
                         "http://3.236.82.208:443/",
                         params={"conv": conv_text, "debug_mode": True, "to_print": True},
-                        headers={"x-api-key": "9c406cbae26316c3f2673bfffc0cb78c5e5a1cdaff0211365e870eb54e30e126"},
+                        headers={"x-api-key": st.secrets["model_server"]["api_key"]},
                         timeout=30,
                     )
                     resp.raise_for_status()
